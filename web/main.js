@@ -1,12 +1,14 @@
 import init, { B2xxDevice } from "./pkg/uhd_pure.js";
 
 const firmwareUrl = new URL("./pkg/usrp_b200_fw.hex", import.meta.url);
+const fpgaUrl = new URL("./pkg/usrp_b200_fpga.bin", import.meta.url);
 
 const log = document.querySelector("#log");
 const deviceControls = document.querySelector("#device-controls");
 const registerControls = document.querySelector("#register-controls");
 let device;
 let firmwareImage;
+let fpgaImage;
 
 const report = (message) => {
   log.textContent = String(message);
@@ -39,6 +41,20 @@ const downloadFirmware = async () => {
     firmwareImage = new Uint8Array(await response.arrayBuffer());
   }
   return firmwareImage;
+};
+
+const downloadFpga = async () => {
+  if (!fpgaImage) {
+    const response = await fetch(fpgaUrl);
+    if (!response.ok) {
+      throw new Error(
+        `Could not download ${fpgaUrl}: HTTP ${response.status}. ` +
+        "Copy usrp_b200_fpga.bin next to uhd_pure_bg.wasm.",
+      );
+    }
+    fpgaImage = new Uint8Array(await response.arrayBuffer());
+  }
+  return fpgaImage;
 };
 
 await init();
@@ -89,10 +105,16 @@ document.querySelector("#probe").addEventListener("click", () => run(async () =>
 }));
 
 document.querySelector("#load-fpga").addEventListener("click", () => run(async () => {
+  if (!device.firmwareLoaded) {
+    throw new Error("Load FX3 firmware and reconnect the B200 before loading the FPGA");
+  }
   const file = document.querySelector("#fpga").files[0];
-  if (!file) throw new Error("Choose a B2xx FPGA .bin file first");
-  report(`Loading ${file.name}…`);
-  report(`FPGA: ${await device.loadFpga(new Uint8Array(await file.arrayBuffer()), false)}`);
+  const name = file?.name ?? fpgaUrl.pathname.split("/").at(-1);
+  const image = file
+    ? new Uint8Array(await file.arrayBuffer())
+    : await downloadFpga();
+  report(`Loading ${name}…`);
+  report(`FPGA: ${await device.loadFpga(image, false)}`);
 }));
 
 document.querySelector("#open-transport").addEventListener("click", () => run(async () => {

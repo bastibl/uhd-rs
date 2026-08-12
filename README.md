@@ -55,6 +55,7 @@ Build the `cdylib` with the JS-facing wrapper enabled:
 ```console
 wasm-pack build --target web --dev --out-dir web/pkg . -- --features wasm
 cp /usr/share/uhd/images/usrp_b200_fw.hex web/pkg/
+cp /usr/share/uhd/images/usrp_b200_fpga.bin web/pkg/
 python3 -m http.server 8000 --directory web
 ```
 
@@ -62,10 +63,11 @@ Call `B2xxDevice.request()` directly from a click/tap handler because browsers
 require transient user activation for the WebUSB chooser. The checked-in Cargo
 target configuration enables the unstable `web-sys` WebUSB bindings required
 by nusb. `web/index.html` is a small device/firmware/FPGA/register probe that
-exercises the generated bindings at `http://localhost:8000`. The page downloads
-`usrp_b200_fw.hex` from the same `web/pkg` directory as `uhd_pure_bg.wasm`.
-Firmware is an external build/deployment asset and is not checked into this
-repository.
+exercises the generated bindings at `http://localhost:8000`. By default the
+page downloads `usrp_b200_fw.hex` and `usrp_b200_fpga.bin` from the same
+`web/pkg` directory as `uhd_pure_bg.wasm`; the file picker can override the FPGA
+image. Firmware and FPGA images are external build/deployment assets and are
+not checked into this repository.
 
 ## B2xx receive transfer sizing
 

@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures_timer::Delay;
 use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
@@ -392,7 +392,7 @@ impl B2xxDevice {
     }
 
     async fn wait_for_state(&self, expected: Fx3State, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
+        let mut remaining = timeout;
         loop {
             let actual = self.fx3_state().await?;
             if actual == expected {
@@ -401,10 +401,12 @@ impl B2xxDevice {
             if matches!(actual, Fx3State::Error | Fx3State::Undefined) {
                 return Err(Error::Fx3State(actual));
             }
-            if Instant::now() >= deadline {
+            if remaining.is_zero() {
                 return Err(Error::Fx3Timeout { expected, timeout });
             }
-            Delay::new(POLL_INTERVAL).await;
+            let delay = remaining.min(POLL_INTERVAL);
+            Delay::new(delay).await;
+            remaining = remaining.saturating_sub(delay);
         }
     }
 
