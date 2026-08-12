@@ -1,0 +1,30 @@
+[package]
+name = "uhd-pure"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "A pure Rust UHD-compatible driver, initially targeting USRP B2xx over native USB and WebUSB"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+
+[dependencies]
+futures-lite = "2.6"
+futures-timer = { version = "3.0", features = ["wasm-bindgen"] }
+nusb = { version = "0.2.7", features = ["smol"] }
+thiserror = "2.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
