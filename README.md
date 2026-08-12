@@ -13,12 +13,15 @@ The implemented B2xx foundation currently includes:
 - all four FPGA bulk endpoints;
 - CHDR packet encoding/decoding; and
 - checked FPGA sessions plus local/radio Wishbone register transactions; and
-- the B2xx SPI core with raw AD9361 register reads and writes.
+- the B2xx SPI core with raw AD9361 register reads and writes; and
+- continuous channel-zero B200 receive streaming, tuning, FPGA DDC rate
+  selection, manual/automatic gain, CHDR validation, and normalized `f32` IQ.
 
-RF tuning, AD9361 initialization, DSP setup, stream commands, flow control, and
-typed sample conversion are not implemented yet. The API should therefore be
-considered an early low-level driver rather than a drop-in replacement for the
-whole C++ `multi_usrp` API.
+Full AD9361 cold-start initialization, calibration after large retunes, transmit
+streaming, and multi-channel operation are not implemented yet. The receive API
+therefore requires a revision 5 or newer B200 whose AD9361 has already received
+its normal initialization, and should not be considered a drop-in replacement
+for the whole C++ `multi_usrp` API.
 
 ## Native diagnostic CLI
 
@@ -59,7 +62,7 @@ target configuration enables the unstable `web-sys` WebUSB bindings required
 by nusb. `web/index.html` is a small device/FPGA/register probe that exercises
 the generated bindings at `http://localhost:8000`.
 
-## Known nusb/B2xx receive-size mismatch
+## B2xx receive transfer sizing
 
 UHD deliberately requests B2xx sample IN transfers of 8176 or 16360 bytes. The
 length must be 8-byte aligned but *not* aligned to the USB maximum packet size,
@@ -67,11 +70,10 @@ which avoids an FX3 failure mode. nusb 0.2.7 currently rejects all IN transfer
 lengths that are not a multiple of the endpoint maximum packet size, including
 on WebUSB.
 
-The current `receive_data` API therefore accepts only nusb-compatible aligned
-lengths, which is enough to exercise the transport but is not yet a reliable
-high-throughput B2xx streamer. Fixing this properly needs an upstream nusb API
-change to permit safe unaligned IN request lengths on WebUSB (and on native
-backends that support them). This repository does not vendor or patch nusb.
+The receive API submits an aligned 16384-byte buffer and accepts the short
+transfer produced when a B2xx frame ends. An upstream nusb API that permits the
+traditional unaligned request length would avoid relying on this short-transfer
+behavior. This repository does not vendor or patch nusb.
 
 ## License
 

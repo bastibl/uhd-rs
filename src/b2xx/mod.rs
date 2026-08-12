@@ -2,12 +2,14 @@
 
 mod device;
 mod fx3;
+mod rx;
 mod session;
 mod spi;
 mod transport;
 
 pub use device::{B2xxDeviceInfo, list_devices, request_device};
 pub use fx3::{B2xxDevice, B2xxIdentity, FirmwareCompatibility, Fx3State, LoadOutcome, UsbSpeed};
+pub use rx::{B2xxReceiver, Complex32, RxConfig, RxGain, RxPacket};
 pub use session::{B2xxSession, FpgaCompatibility};
 pub use spi::{Ad9361Io, B2xxSpi, SpiConfig, SpiEdge};
 pub use transport::{B2xxTransport, RadioControl, StreamId};

@@ -21,6 +21,15 @@ pub enum Error {
     #[error("invalid CHDR packet: {0}")]
     Chdr(String),
 
+    #[error("receive overflow: expected CHDR sequence {expected}, got {actual}")]
+    ReceiveOverflow { expected: u16, actual: u16 },
+
+    #[error("the B200 reported a receive FIFO overflow at CHDR sequence {sequence}")]
+    DeviceReceiveOverflow { sequence: u16 },
+
+    #[error("the B200 reported receive context code 0x{code:02x} at CHDR sequence {sequence}")]
+    ReceiveContext { code: u8, sequence: u16 },
+
     #[error("timed out after {timeout:?} waiting for an FPGA control response")]
     ControlTimeout { timeout: Duration },
 
@@ -57,6 +66,15 @@ pub enum Error {
 
     #[error("FPGA reported an invalid number of radio chains: {0}")]
     RadioChainCount(u8),
+
+    #[error("the AD9361 is in state 0x{state:x}; cold-start initialization is required")]
+    Ad9361NotInitialized { state: u8 },
+
+    #[error("timed out waiting for AD9361 state 0x{expected:x}")]
+    Ad9361StateTimeout { expected: u8 },
+
+    #[error("the AD9361 receive PLL did not lock at {frequency_hz} Hz")]
+    Ad9361PllUnlocked { frequency_hz: f64 },
 
     #[error("motherboard EEPROM has an unknown signature 0x{0:08x}")]
     EepromSignature(u32),
