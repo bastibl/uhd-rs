@@ -49,10 +49,13 @@ async fn run() -> uhd_pure::Result<()> {
             "unknown command {command:?}; run `uhd-pure help`"
         )));
     }
+    if command == "load-firmware" {
+        return load_firmware(&arguments).await;
+    }
 
     let serial = match command.as_str() {
         "probe" => arguments.first(),
-        "load-firmware" | "peek" | "ad9361-read" => arguments.get(1),
+        "peek" | "ad9361-read" => arguments.get(1),
         "load-fpga" => arguments.get(1).filter(|value| value.as_str() != "--force"),
         "poke" => arguments.get(2),
         "loopback" => arguments.get(1),
@@ -80,12 +83,6 @@ async fn run() -> uhd_pure::Result<()> {
                 compatibility.minor,
                 state
             );
-        }
-        "load-firmware" => {
-            let path = required_argument(&arguments, 0, "firmware Intel HEX path")?;
-            let image = std::fs::read(path)?;
-            device.load_firmware(&image).await?;
-            println!("Firmware image sent; wait for the device to re-enumerate.");
         }
         "load-fpga" => {
             let path = required_argument(&arguments, 0, "FPGA .bin path")?;
@@ -146,6 +143,117 @@ async fn run() -> uhd_pure::Result<()> {
         _ => unreachable!("command validated above"),
     }
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn load_firmware(arguments: &[String]) -> uhd_pure::Result<()> {
+    use std::time::Duration;
+
+    const REENUMERATION_TIMEOUT: Duration = Duration::from_secs(10);
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    if arguments.len() > 2 {
+        return Err(uhd_pure::Error::InvalidArgument(
+            "usage: uhd-pure load-firmware <usrp_b200_fw.hex> [serial]".into(),
+        ));
+    }
+    let path = required_argument(arguments, 0, "firmware Intel HEX path")?;
+    let image = std::fs::read(path)?;
+    // Validate the complete image before resetting a working device.
+    uhd_pure::ihex::parse(&image)?;
+
+    let info = select_device(arguments.get(1).map(String::as_str)).await?;
+    let bus_id = info.bus_id().to_owned();
+    let port_chain = info.port_chain().to_vec();
+    let expected_serial = info
+        .firmware_loaded
+        .then(|| info.serial_number.clone())
+        .flatten();
+    let bootloader_info = if info.firmware_loaded {
+        println!("Resetting running FX3 firmware to the bootloader...");
+        let device = info.open().await?;
+        device.reset_fx3().await?;
+        drop(device);
+        wait_for_device(
+            &bus_id,
+            &port_chain,
+            false,
+            None,
+            "enter its FX3 bootloader",
+            REENUMERATION_TIMEOUT,
+            POLL_INTERVAL,
+        )
+        .await?
+    } else {
+        info
+    };
+
+    println!("Loading FX3 firmware from {path}...");
+    let bootloader = bootloader_info.open().await?;
+    bootloader.load_firmware(&image).await?;
+    drop(bootloader);
+
+    let loaded_info = wait_for_device(
+        &bus_id,
+        &port_chain,
+        true,
+        expected_serial.as_deref(),
+        "re-enumerate with firmware",
+        REENUMERATION_TIMEOUT,
+        POLL_INTERVAL,
+    )
+    .await?;
+    let loaded = loaded_info.open().await?;
+    let compatibility = loaded.check_firmware_compatibility().await?;
+    let identity = loaded.identity().await?;
+    println!(
+        "Firmware {}.{} running on {} serial={} name={:?}.",
+        compatibility.major,
+        compatibility.minor,
+        identity.product.map_or("B2xx", |product| product.name()),
+        identity.serial,
+        identity.name
+    );
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_device(
+    bus_id: &str,
+    port_chain: &[u8],
+    firmware_loaded: bool,
+    expected_serial: Option<&str>,
+    state: &'static str,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> uhd_pure::Result<uhd_pure::b2xx::B2xxDeviceInfo> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut candidates: Vec<_> = uhd_pure::b2xx::list_devices()
+            .await?
+            .into_iter()
+            .filter(|info| info.firmware_loaded == firmware_loaded)
+            .collect();
+        let position = candidates
+            .iter()
+            .position(|info| info.bus_id() == bus_id && info.port_chain() == port_chain)
+            .or_else(|| {
+                expected_serial.and_then(|serial| {
+                    candidates
+                        .iter()
+                        .position(|info| info.serial_number.as_deref() == Some(serial))
+                })
+            })
+            .or_else(|| (candidates.len() == 1).then_some(0));
+        if let Some(position) = position {
+            let info = candidates.swap_remove(position);
+            return Ok(info);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(uhd_pure::Error::DeviceReenumerationTimeout { state, timeout });
+        }
+        futures_timer::Delay::new(poll_interval).await;
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -19,6 +19,7 @@ pub fn parse(input: &[u8]) -> Result<Vec<Segment>> {
     let mut upper = 0_u16;
     let mut segments = Vec::new();
     let mut saw_eof = false;
+    let mut saw_execute = false;
 
     for (line_index, raw_line) in text.lines().enumerate() {
         let line_number = line_index + 1;
@@ -33,11 +34,19 @@ pub fn parse(input: &[u8]) -> Result<Vec<Segment>> {
         let data = &bytes[4..4 + length];
 
         match kind {
-            0x00 => segments.push(Segment {
-                address: (u32::from(upper) << 16) | u32::from(address),
-                data: data.to_vec(),
-                execute: false,
-            }),
+            0x00 => {
+                if saw_execute {
+                    return ihex_error(
+                        line_number,
+                        "data record appears after the start address record",
+                    );
+                }
+                segments.push(Segment {
+                    address: (u32::from(upper) << 16) | u32::from(address),
+                    data: data.to_vec(),
+                    execute: false,
+                });
+            }
             0x01 => {
                 if address != 0 || !data.is_empty() {
                     return ihex_error(line_number, "EOF record must have address and length zero");
@@ -61,6 +70,10 @@ pub fn parse(input: &[u8]) -> Result<Vec<Segment>> {
                         "start linear address record must contain four bytes at address zero",
                     );
                 }
+                if saw_execute {
+                    return ihex_error(line_number, "multiple start address records");
+                }
+                saw_execute = true;
                 segments.push(Segment {
                     address: u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
                     data: Vec::new(),
@@ -78,6 +91,9 @@ pub fn parse(input: &[u8]) -> Result<Vec<Segment>> {
 
     if !saw_eof {
         return ihex_error(text.lines().count(), "missing EOF record");
+    }
+    if !saw_execute {
+        return ihex_error(text.lines().count(), "missing start address record");
     }
     Ok(segments)
 }
@@ -151,6 +167,11 @@ mod tests {
 
     #[test]
     fn requires_eof() {
-        assert!(parse(b":0100000001FE\n").is_err());
+        assert!(parse(b":0400000500010010E6\n").is_err());
+    }
+
+    #[test]
+    fn requires_start_address() {
+        assert!(parse(b":00000001FF\n").is_err());
     }
 }

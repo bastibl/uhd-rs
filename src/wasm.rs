@@ -43,6 +43,11 @@ impl WebB2xxDevice {
         self.inner.info().product_string.clone()
     }
 
+    #[wasm_bindgen(getter, js_name = firmwareLoaded)]
+    pub fn firmware_loaded(&self) -> bool {
+        self.inner.info().firmware_loaded
+    }
+
     #[wasm_bindgen(js_name = usbVersion)]
     pub async fn usb_version(&self) -> Result<u8, JsValue> {
         self.inner
@@ -90,6 +95,13 @@ impl WebB2xxDevice {
     #[wasm_bindgen(js_name = loadFirmware)]
     pub async fn load_firmware(&self, image: Vec<u8>) -> Result<(), JsValue> {
         self.inner.load_firmware(&image).await.map_err(js_error)
+    }
+
+    /// Reset running firmware back to the FX3 bootloader. The device handle is
+    /// invalid after this returns and WebUSB permission must be requested again.
+    #[wasm_bindgen(js_name = resetFx3)]
+    pub async fn reset_fx3(&self) -> Result<(), JsValue> {
+        self.inner.reset_fx3().await.map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = loadFpga)]

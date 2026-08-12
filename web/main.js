@@ -1,9 +1,12 @@
 import init, { B2xxDevice } from "./pkg/uhd_pure.js";
 
+const firmwareUrl = new URL("./pkg/usrp_b200_fw.hex", import.meta.url);
+
 const log = document.querySelector("#log");
 const deviceControls = document.querySelector("#device-controls");
 const registerControls = document.querySelector("#register-controls");
 let device;
+let firmwareImage;
 
 const report = (message) => {
   log.textContent = String(message);
@@ -15,6 +18,27 @@ const run = async (operation) => {
   } catch (error) {
     report(`Error: ${error}`);
   }
+};
+
+const disconnected = (message) => {
+  device = undefined;
+  deviceControls.disabled = true;
+  registerControls.disabled = true;
+  report(message);
+};
+
+const downloadFirmware = async () => {
+  if (!firmwareImage) {
+    const response = await fetch(firmwareUrl);
+    if (!response.ok) {
+      throw new Error(
+        `Could not download ${firmwareUrl}: HTTP ${response.status}. ` +
+        "Copy usrp_b200_fw.hex next to uhd_pure_bg.wasm.",
+      );
+    }
+    firmwareImage = new Uint8Array(await response.arrayBuffer());
+  }
+  return firmwareImage;
 };
 
 await init();
@@ -31,7 +55,26 @@ document.querySelector("#connect").addEventListener("click", () => run(async () 
     `Connected ${device.productName ?? "B2xx"} ` +
     `${device.vendorId.toString(16).padStart(4, "0")}:` +
     `${device.productId.toString(16).padStart(4, "0")} ` +
-    `serial=${device.serialNumber ?? "unknown"}`,
+    `serial=${device.serialNumber ?? "unknown"} ` +
+    `firmware=${device.firmwareLoaded ? "running" : "bootloader"}`,
+  );
+}));
+
+document.querySelector("#load-firmware").addEventListener("click", () => run(async () => {
+  const image = await downloadFirmware();
+  if (device.firmwareLoaded) {
+    report("Firmware is running; resetting the FX3 to its bootloader…");
+    await device.resetFx3();
+    disconnected(
+      "FX3 reset. Click Connect B2xx, select the bootloader device, then click Load FX3 firmware again.",
+    );
+    return;
+  }
+
+  report(`Loading ${firmwareUrl.pathname.split("/").at(-1)}…`);
+  await device.loadFirmware(image);
+  disconnected(
+    "Firmware started. Click Connect B2xx again and select the re-enumerated B200.",
   );
 }));
 

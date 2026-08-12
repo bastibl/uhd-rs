@@ -12,6 +12,12 @@ pub enum Error {
     #[error("no supported USRP B2xx device was found")]
     DeviceNotFound,
 
+    #[error("timed out after {timeout:?} waiting for the B2xx to {state}")]
+    DeviceReenumerationTimeout {
+        state: &'static str,
+        timeout: Duration,
+    },
+
     #[error("the device returned {actual} bytes, expected {expected}")]
     ShortTransfer { expected: usize, actual: usize },
 

@@ -203,6 +203,11 @@ impl B2xxDevice {
     /// Load a Cypress FX3 Intel HEX image. The USB device normally
     /// re-enumerates after the execute record, invalidating this handle.
     pub async fn load_firmware(&self, image: &[u8]) -> Result<()> {
+        if self.info.firmware_loaded {
+            return Err(Error::InvalidArgument(
+                "FX3 firmware can only be loaded while the device is in its bootloader".into(),
+            ));
+        }
         let segments = ihex::parse(image)?;
         for segment in segments {
             let address = segment.address.to_le_bytes();

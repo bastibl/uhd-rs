@@ -43,6 +43,21 @@ impl B2xxDeviceInfo {
         super::B2xxDevice::open(self).await
     }
 
+    /// Platform-specific USB bus identifier. Together with [`Self::port_chain`],
+    /// this identifies the physical connector across FX3 re-enumeration.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn bus_id(&self) -> &str {
+        self.inner.bus_id()
+    }
+
+    /// USB hub port path used to match a device before and after firmware load.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn port_chain(&self) -> &[u8] {
+        self.inner.port_chain()
+    }
+
     pub(crate) fn nusb_info(&self) -> &nusb::DeviceInfo {
         &self.inner
     }

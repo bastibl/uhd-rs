@@ -28,6 +28,7 @@ for the whole C++ `multi_usrp` API.
 ```console
 cargo run -- list
 cargo run -- probe
+cargo run -- load-firmware /usr/share/uhd/images/usrp_b200_fw.hex
 cargo run -- load-fpga /usr/share/uhd/images/usrp_b200_fpga.bin
 cargo run -- peek 0x50
 ```
@@ -53,14 +54,18 @@ Build the `cdylib` with the JS-facing wrapper enabled:
 
 ```console
 wasm-pack build --target web --dev --out-dir web/pkg . -- --features wasm
+cp /usr/share/uhd/images/usrp_b200_fw.hex web/pkg/
 python3 -m http.server 8000 --directory web
 ```
 
 Call `B2xxDevice.request()` directly from a click/tap handler because browsers
 require transient user activation for the WebUSB chooser. The checked-in Cargo
 target configuration enables the unstable `web-sys` WebUSB bindings required
-by nusb. `web/index.html` is a small device/FPGA/register probe that exercises
-the generated bindings at `http://localhost:8000`.
+by nusb. `web/index.html` is a small device/firmware/FPGA/register probe that
+exercises the generated bindings at `http://localhost:8000`. The page downloads
+`usrp_b200_fw.hex` from the same `web/pkg` directory as `uhd_pure_bg.wasm`.
+Firmware is an external build/deployment asset and is not checked into this
+repository.
 
 ## B2xx receive transfer sizing
 
