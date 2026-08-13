@@ -4,6 +4,7 @@ version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Thomas Habets <thomas@habets.se>"]
+repository = "https://github.com/ThomasHabets/uhd-pure"
 readme = "README.md"
 keywords = ["SDR", "radio"]
 # License same as libuhd, because likely derivative work.
