@@ -1,5 +1,7 @@
 //! Support for the USRP B200, B210, B200mini, and B205mini.
 
+pub(crate) mod ad9361;
+mod ad9361_tables;
 mod device;
 mod fx3;
 mod rx;

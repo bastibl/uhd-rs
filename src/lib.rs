@@ -6,10 +6,10 @@
 //!
 //! This crate currently provides device discovery, `WebUSB` permission requests,
 //! FX3 and FPGA image loading, motherboard EEPROM identity, raw B2xx bulk
-//! transport, CHDR packet framing, and Wishbone register access. The higher
-//! level APIs include channel-zero receive streaming from an already-initialized
-//! revision 5 or newer B200. Full AD9361 cold-start initialization is still
-//! being built on this foundation.
+//! transport, CHDR packet framing, Wishbone register access, and pure-Rust
+//! AD9364 cold-start initialization for revision 5 or newer B200 hardware. The
+//! higher-level APIs include automatic radio initialization and channel-zero
+//! receive streaming.
 
 pub mod b2xx;
 pub mod chdr;

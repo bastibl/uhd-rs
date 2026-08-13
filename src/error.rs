@@ -82,6 +82,17 @@ pub enum Error {
     #[error("the AD9361 receive PLL did not lock at {frequency_hz} Hz")]
     Ad9361PllUnlocked { frequency_hz: f64 },
 
+    #[error("AD9361 initialization failed during {stage}: {detail}")]
+    Ad9361Initialization { stage: &'static str, detail: String },
+
+    #[error("timed out during AD9361 {stage}")]
+    Ad9361CalibrationTimeout { stage: &'static str },
+
+    #[error(
+        "AD9361 digital loopback failed: expected 0x{expected:08x}, got TX=0x{tx:08x}, RX=0x{rx:08x}"
+    )]
+    Ad9361Loopback { expected: u32, tx: u32, rx: u32 },
+
     #[error("motherboard EEPROM has an unknown signature 0x{0:08x}")]
     EepromSignature(u32),
 

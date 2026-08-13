@@ -1,12 +1,13 @@
 use wasm_bindgen::prelude::*;
 
-use crate::b2xx::{B2xxDevice, RadioControl, StreamId};
+use crate::b2xx::{B2xxDevice, RadioControl, StreamId, ad9361::Ad9361Controller};
 
 /// JavaScript-facing B2xx handle backed by nusb's WebUSB implementation.
 #[wasm_bindgen(js_name = B2xxDevice)]
 pub struct WebB2xxDevice {
     inner: B2xxDevice,
     control: Option<RadioControl>,
+    radio: Option<Ad9361Controller>,
 }
 
 #[wasm_bindgen(js_class = B2xxDevice)]
@@ -20,6 +21,7 @@ impl WebB2xxDevice {
         Ok(Some(Self {
             inner,
             control: None,
+            radio: None,
         }))
     }
 
@@ -105,7 +107,9 @@ impl WebB2xxDevice {
     }
 
     #[wasm_bindgen(js_name = loadFpga)]
-    pub async fn load_fpga(&self, image: Vec<u8>, force: bool) -> Result<String, JsValue> {
+    pub async fn load_fpga(&mut self, image: Vec<u8>, force: bool) -> Result<String, JsValue> {
+        self.radio = None;
+        self.control = None;
         let outcome = self
             .inner
             .load_fpga(&image, force)
@@ -118,8 +122,32 @@ impl WebB2xxDevice {
     /// Claim all bulk interfaces and enable local register access.
     #[wasm_bindgen(js_name = openTransport)]
     pub async fn open_transport(&mut self) -> Result<(), JsValue> {
+        if self.control.is_some() {
+            return Ok(());
+        }
         let transport = self.inner.open_transport().await.map_err(js_error)?;
         self.control = Some(transport.into_radio_control(StreamId::LocalControl));
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter, js_name = radioInitialized)]
+    pub fn radio_initialized(&self) -> bool {
+        self.radio.is_some()
+    }
+
+    /// Reset, configure, calibrate, and verify a revision-5-or-newer B200 radio.
+    #[wasm_bindgen(js_name = initializeRadio)]
+    pub async fn initialize_radio(&mut self) -> Result<(), JsValue> {
+        self.inner
+            .check_firmware_compatibility()
+            .await
+            .map_err(js_error)?;
+        let identity = self.inner.identity().await.map_err(js_error)?;
+        self.open_transport().await?;
+        let radio = Ad9361Controller::initialize_b200(self.control_mut()?, &identity)
+            .await
+            .map_err(js_error)?;
+        self.radio = Some(radio);
         Ok(())
     }
 

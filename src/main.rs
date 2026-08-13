@@ -43,7 +43,14 @@ async fn run() -> uhd_pure::Result<()> {
     }
     if !matches!(
         command.as_str(),
-        "probe" | "load-firmware" | "load-fpga" | "peek" | "poke" | "ad9361-read" | "loopback"
+        "probe"
+            | "load-firmware"
+            | "load-fpga"
+            | "init-radio"
+            | "peek"
+            | "poke"
+            | "ad9361-read"
+            | "loopback"
     ) {
         return Err(uhd_pure::Error::InvalidArgument(format!(
             "unknown command {command:?}; run `uhd-pure help`"
@@ -54,7 +61,7 @@ async fn run() -> uhd_pure::Result<()> {
     }
 
     let serial = match command.as_str() {
-        "probe" => arguments.first(),
+        "probe" | "init-radio" => arguments.first(),
         "peek" | "ad9361-read" => arguments.get(1),
         "load-fpga" => arguments.get(1).filter(|value| value.as_str() != "--force"),
         "poke" => arguments.get(2),
@@ -88,9 +95,27 @@ async fn run() -> uhd_pure::Result<()> {
             let path = required_argument(&arguments, 0, "FPGA .bin path")?;
             let image = std::fs::read(path)?;
             let force = arguments.iter().skip(1).any(|value| value == "--force");
-            let outcome = device.load_fpga(&image, force).await?;
-            device.reset_gpif().await?;
-            println!("FPGA result: {outcome:?}; GPIF reset complete.");
+            let (session, outcome) = device.start(&image, force).await?;
+            println!(
+                "FPGA result: {outcome:?}; {} serial={} radio initialized.",
+                session.product(),
+                session.identity().serial
+            );
+        }
+        "init-radio" => {
+            if arguments.len() > 1 {
+                return Err(uhd_pure::Error::InvalidArgument(
+                    "usage: uhd-pure init-radio [serial]".into(),
+                ));
+            }
+            let session = device.open_session().await?;
+            println!(
+                "{} serial={} radio initialized; FPGA {}.{}.",
+                session.product(),
+                session.identity().serial,
+                session.fpga_compatibility().major,
+                session.fpga_compatibility().minor
+            );
         }
         "peek" => {
             let address = parse_number(required_argument(&arguments, 0, "byte address")?)?;
@@ -324,6 +349,6 @@ fn parse_u8(value: &str, description: &str) -> uhd_pure::Result<u8> {
 #[cfg(not(target_arch = "wasm32"))]
 fn print_help() {
     println!(
-        "uhd-pure commands:\n  list\n  probe [serial]\n  load-firmware <usrp_b200_fw.hex> [serial]\n  load-fpga <usrp_b2xx_fpga.bin> [serial] [--force]\n  peek <byte-address> [serial]\n  poke <byte-address> <value> [serial]\n  ad9361-read <register> [serial]\n  loopback [channel] [serial]"
+        "uhd-pure commands:\n  list\n  probe [serial]\n  load-firmware <usrp_b200_fw.hex> [serial]\n  load-fpga <usrp_b2xx_fpga.bin> [serial] [--force]\n  init-radio [serial]\n  peek <byte-address> [serial]\n  poke <byte-address> <value> [serial]\n  ad9361-read <register> [serial]\n  loopback [channel] [serial]"
     );
 }

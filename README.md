@@ -11,17 +11,18 @@ The implemented B2xx foundation currently includes:
 - B200/B210/B200mini/B205mini FPGA loading and image hash checks;
 - FX3 state, compatibility, USB-speed, and motherboard EEPROM queries;
 - all four FPGA bulk endpoints;
-- CHDR packet encoding/decoding; and
-- checked FPGA sessions plus local/radio Wishbone register transactions; and
-- the B2xx SPI core with raw AD9361 register reads and writes; and
+- CHDR packet encoding/decoding;
+- checked FPGA sessions plus local/radio Wishbone register transactions;
+- the B2xx SPI core with raw AD9361 register reads and writes;
+- pure-Rust B200 AD9364 cold-start initialization, calibration, and digital
+  interface loopback verification; and
 - continuous channel-zero B200 receive streaming, tuning, FPGA DDC rate
   selection, manual/automatic gain, CHDR validation, and normalized `f32` IQ.
 
-Full AD9361 cold-start initialization, calibration after large retunes, transmit
-streaming, and multi-channel operation are not implemented yet. The receive API
-therefore requires a revision 5 or newer B200 whose AD9361 has already received
-its normal initialization, and should not be considered a drop-in replacement
-for the whole C++ `multi_usrp` API.
+Radio initialization and the receive API currently target a revision 5 or newer
+B200/AD9364. B210/mini radio initialization, transmit streaming, and
+multi-channel operation are not implemented yet, so this should not be
+considered a drop-in replacement for the whole C++ `multi_usrp` API.
 
 ## Native diagnostic CLI
 
@@ -30,6 +31,7 @@ cargo run -- list
 cargo run -- probe
 cargo run -- load-firmware /usr/share/uhd/images/usrp_b200_fw.hex
 cargo run -- load-fpga /usr/share/uhd/images/usrp_b200_fpga.bin
+cargo run -- init-radio
 cargo run -- peek 0x50
 ```
 
@@ -43,10 +45,9 @@ The native fixed-frequency receive example captures 10 seconds at 100 MHz and
 cargo run --release --example rx_100mhz -- capture.fc32
 ```
 
-The example currently targets a revision 5 or newer B200 whose AD9361 has
-already been initialized. It performs the 100 MHz retune and all FPGA receive
-stream setup itself. Full cold-start AD9361 initialization is not implemented
-yet.
+The example targets a revision 5 or newer B200. It cold-starts and calibrates
+the AD9364, verifies its digital interface, performs the 100 MHz retune, and
+sets up the FPGA receive stream automatically.
 
 ## WebUSB
 
@@ -66,8 +67,14 @@ by nusb. `web/index.html` is a small device/firmware/FPGA/register probe that
 exercises the generated bindings at `http://localhost:8000`. By default the
 page downloads `usrp_b200_fw.hex` and `usrp_b200_fpga.bin` from the same
 `web/pkg` directory as `uhd_pure_bg.wasm`; the file picker can override the FPGA
-image. Firmware and FPGA images are external build/deployment assets and are
-not checked into this repository.
+image. Loading the FPGA from the page also initializes and verifies the radio.
+Applications can call `initializeRadio()` explicitly, while the Rust
+`B2xxReceiver::open()` and session startup paths do so automatically. Firmware
+and FPGA images are external build/deployment assets and are not checked into
+this repository. Click **Release B200 for another app** (or call the generated
+wasm-bindgen object's `free()` method) before opening the device from another
+page or a native process; the WebUSB handle otherwise keeps its interfaces
+claimed.
 
 ## B2xx receive transfer sizing
 

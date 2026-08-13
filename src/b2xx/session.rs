@@ -1,4 +1,7 @@
-use super::{B2xxDevice, B2xxIdentity, LoadOutcome, Product, RadioControl, StreamId, UsbSpeed};
+use super::{
+    B2xxDevice, B2xxIdentity, Fx3State, LoadOutcome, Product, RadioControl, StreamId, UsbSpeed,
+    ad9361::Ad9361Controller,
+};
 use crate::{Error, Result};
 
 const FPGA_SIGNATURE: u32 = 0xace0_ba5e;
@@ -13,8 +16,7 @@ pub struct FpgaCompatibility {
 
 /// A B2xx with compatible firmware and FPGA and all bulk interfaces open.
 ///
-/// This is the boundary between image/device management and radio setup. The
-/// AD9361 and DSP cores still need to be configured before samples can flow.
+/// This is the boundary between image/device management and radio setup.
 pub struct B2xxSession {
     device: B2xxDevice,
     identity: B2xxIdentity,
@@ -23,6 +25,7 @@ pub struct B2xxSession {
     fpga: FpgaCompatibility,
     radio_chains: u8,
     control: RadioControl,
+    radio: Option<Ad9361Controller>,
 }
 
 impl std::fmt::Debug for B2xxSession {
@@ -39,11 +42,30 @@ impl std::fmt::Debug for B2xxSession {
 }
 
 impl B2xxSession {
+    pub(crate) async fn open(device: B2xxDevice) -> Result<Self> {
+        if device.fx3_state().await? != Fx3State::Running {
+            return Err(Error::Unsupported(
+                "the B2xx FPGA is not running; load its FPGA image before opening a session",
+            ));
+        }
+        device.reset_gpif().await?;
+        Self::open_after_gpif(device).await
+    }
+
     pub(crate) async fn start(
         device: B2xxDevice,
         fpga_image: &[u8],
         force: bool,
     ) -> Result<(Self, LoadOutcome)> {
+        device.check_firmware_compatibility().await?;
+        let load_outcome = device.load_fpga(fpga_image, force).await?;
+        device.reset_gpif().await?;
+        let mut session = Self::open_after_gpif(device).await?;
+        session.initialize_radio().await?;
+        Ok((session, load_outcome))
+    }
+
+    async fn open_after_gpif(device: B2xxDevice) -> Result<Self> {
         device.check_firmware_compatibility().await?;
         let identity = device.identity().await?;
         let product =
@@ -55,9 +77,6 @@ impl B2xxSession {
                     product_id: device.info().product_id,
                 })?;
         let usb_speed = device.usb_speed().await?;
-        let load_outcome = device.load_fpga(fpga_image, force).await?;
-        device.reset_gpif().await?;
-
         let transport = device.open_transport().await?;
         let mut control = transport.into_radio_control(StreamId::LocalControl);
         let raw_compatibility = control.peek64(0).await?;
@@ -84,18 +103,16 @@ impl B2xxSession {
         if !(1..=2).contains(&radio_chains) {
             return Err(Error::RadioChainCount(radio_chains));
         }
-        Ok((
-            Self {
-                device,
-                identity,
-                product,
-                usb_speed,
-                fpga,
-                radio_chains,
-                control,
-            },
-            load_outcome,
-        ))
+        Ok(Self {
+            device,
+            identity,
+            product,
+            usb_speed,
+            fpga,
+            radio_chains,
+            control,
+            radio: None,
+        })
     }
 
     #[must_use]
@@ -129,6 +146,18 @@ impl B2xxSession {
     }
 
     #[must_use]
+    pub const fn radio_initialized(&self) -> bool {
+        self.radio.is_some()
+    }
+
+    /// Reset, configure, calibrate, and verify the B200's AD9364 radio.
+    pub async fn initialize_radio(&mut self) -> Result<()> {
+        let radio = Ad9361Controller::initialize_b200(&mut self.control, &self.identity).await?;
+        self.radio = Some(radio);
+        Ok(())
+    }
+
+    #[must_use]
     pub const fn control_mut(&mut self) -> &mut RadioControl {
         &mut self.control
     }
@@ -142,6 +171,15 @@ impl B2xxSession {
     /// Borrow a raw AD9361 register interface.
     pub fn ad9361(&mut self) -> super::Ad9361Io<'_> {
         super::Ad9361Io::new(self.spi())
+    }
+
+    pub(crate) fn into_radio_parts(
+        self,
+    ) -> Result<(RadioControl, B2xxIdentity, Product, Ad9361Controller)> {
+        let radio = self.radio.ok_or(Error::Unsupported(
+            "the B2xx session radio has not been initialized",
+        ))?;
+        Ok((self.control, self.identity, self.product, radio))
     }
 }
 

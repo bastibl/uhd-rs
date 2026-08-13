@@ -23,6 +23,7 @@ const run = async (operation) => {
 };
 
 const disconnected = (message) => {
+  device?.free();
   device = undefined;
   deviceControls.disabled = true;
   registerControls.disabled = true;
@@ -61,6 +62,8 @@ await init();
 report("Ready. WebUSB requires a supporting browser and a secure context (HTTPS or localhost).");
 
 document.querySelector("#connect").addEventListener("click", () => run(async () => {
+  device?.free();
+  device = undefined;
   device = await B2xxDevice.request();
   if (!device) {
     report("No device selected.");
@@ -114,13 +117,28 @@ document.querySelector("#load-fpga").addEventListener("click", () => run(async (
     ? new Uint8Array(await file.arrayBuffer())
     : await downloadFpga();
   report(`Loading ${name}…`);
-  report(`FPGA: ${await device.loadFpga(image, false)}`);
+  const outcome = await device.loadFpga(image, false);
+  report(`FPGA: ${outcome}\nInitializing AD9364 radio…`);
+  await device.initializeRadio();
+  registerControls.disabled = false;
+  report(`FPGA: ${outcome}\nAD9364 radio initialized and loopback verified.`);
+}));
+
+document.querySelector("#initialize-radio").addEventListener("click", () => run(async () => {
+  report("Initializing AD9364 radio…");
+  await device.initializeRadio();
+  registerControls.disabled = false;
+  report("AD9364 radio initialized and loopback verified.");
 }));
 
 document.querySelector("#open-transport").addEventListener("click", () => run(async () => {
   await device.openTransport();
   registerControls.disabled = false;
   report("FPGA bulk interfaces claimed.");
+}));
+
+document.querySelector("#disconnect").addEventListener("click", () => run(async () => {
+  disconnected("B200 released. It can now be opened by another page or native process.");
 }));
 
 document.querySelector("#peek").addEventListener("click", () => run(async () => {

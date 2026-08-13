@@ -391,6 +391,13 @@ impl B2xxDevice {
         super::B2xxSession::start(self, fpga_image, force).await
     }
 
+    /// Open an already-running FPGA and cold-start the B200 radio.
+    pub async fn open_session(self) -> Result<super::B2xxSession> {
+        let mut session = super::B2xxSession::open(self).await?;
+        session.initialize_radio().await?;
+        Ok(session)
+    }
+
     async fn wait_for_state(&self, expected: Fx3State, timeout: Duration) -> Result<()> {
         let mut remaining = timeout;
         loop {
