@@ -63,18 +63,22 @@ python3 -m http.server 8000 --directory web
 Call `B2xxDevice.request()` directly from a click/tap handler because browsers
 require transient user activation for the WebUSB chooser. The checked-in Cargo
 target configuration enables the unstable `web-sys` WebUSB bindings required
-by nusb. `web/index.html` is a small device/firmware/FPGA/register probe that
-exercises the generated bindings at `http://localhost:8000`. By default the
-page downloads `usrp_b200_fw.hex` and `usrp_b200_fpga.bin` from the same
-`web/pkg` directory as `uhd_pure_bg.wasm`; the file picker can override the FPGA
-image. Loading the FPGA from the page also initializes and verifies the radio.
+by nusb.
+
+`web/index.html` is a small device/firmware/FPGA/register probe that exercises
+the generated bindings at `http://localhost:8000`. By default the page downloads
+`usrp_b200_fw.hex` and `usrp_b200_fpga.bin` from the same `web/pkg` directory as
+`uhd_pure_bg.wasm`; the file picker can override the FPGA image.  Loading the
+FPGA from the page also initializes and verifies the radio.
+
 Applications can call `initializeRadio()` explicitly, while the Rust
-`B2xxReceiver::open()` and session startup paths do so automatically. Firmware
-and FPGA images are external build/deployment assets and are not checked into
-this repository. Click **Release B200 for another app** (or call the generated
-wasm-bindgen object's `free()` method) before opening the device from another
-page or a native process; the WebUSB handle otherwise keeps its interfaces
-claimed.
+`B2xxReceiver::open()` and session startup paths do so automatically.
+
+Firmware and FPGA images are external build/deployment assets and are not
+checked into this repository. Click **Release B200 for another app** (or call
+the generated wasm-bindgen object's `free()` method) before opening the device
+from another page or a native process; the WebUSB handle otherwise keeps its
+interfaces claimed.
 
 ## B2xx receive transfer sizing
 
@@ -91,4 +95,14 @@ behavior. This repository does not vendor or patch nusb.
 
 ## License
 
-GPL-3.0-or-later, matching UHD.
+GPL-3.0-or-later, matching UHD. This crate should be considered a derivative
+work of UHD, as LLM has clearly looked closely at the code. For the full story
+on ownership and license see [the UHD
+code](https://github.com/EttusResearch/uhd), and/or [the host
+directory](https://github.com/EttusResearch/uhd/blob/master/host/LICENSE).
+
+If any alternative license for UHD is obtained, as mentioned by the UHD license,
+then the authors of this crate agree to the same license without asking for any
+compensation. "You get this crate for free" if you make such a deal.
+
+But if you're happy with GPL 3.0 or later, then that's all you need to know.
