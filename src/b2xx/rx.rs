@@ -73,6 +73,77 @@ pub struct RxConfig {
     pub gain: RxGain,
 }
 
+/// Requested logical receive center and RF-LO offset.
+///
+/// The RF synthesizer is tuned to `center_frequency_hz + lo_offset_hz` and
+/// the FPGA DDC translates the result back to the requested logical center.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RxTuneRequest {
+    /// Logical center frequency presented by the receive stream, in Hz.
+    pub center_frequency_hz: f64,
+    /// Signed offset from the logical center to the physical RF LO, in Hz.
+    pub lo_offset_hz: f64,
+}
+
+impl RxTuneRequest {
+    /// Construct a zero-IF tune request.
+    #[must_use]
+    pub const fn new(center_frequency_hz: f64) -> Self {
+        Self {
+            center_frequency_hz,
+            lo_offset_hz: 0.0,
+        }
+    }
+
+    /// Construct a low-IF tune request with an explicit RF-LO offset.
+    #[must_use]
+    pub const fn with_lo_offset(center_frequency_hz: f64, lo_offset_hz: f64) -> Self {
+        Self {
+            center_frequency_hz,
+            lo_offset_hz,
+        }
+    }
+
+    /// Validate the logical center, physical LO, and CORDIC range.
+    pub fn validate(self) -> Result<Self> {
+        validate_range(
+            "center frequency",
+            self.center_frequency_hz,
+            MIN_RF_HZ,
+            MAX_RF_HZ,
+        )?;
+        if !self.lo_offset_hz.is_finite() {
+            return Err(Error::InvalidArgument("LO offset must be finite".into()));
+        }
+        let rf_frequency_hz = self.center_frequency_hz + self.lo_offset_hz;
+        validate_range("RF LO frequency", rf_frequency_hz, MIN_RF_HZ, MAX_RF_HZ)?;
+        if self.lo_offset_hz.abs() >= MASTER_CLOCK_HZ / 2.0 {
+            return Err(Error::InvalidArgument(format!(
+                "absolute LO offset must be below {}",
+                MASTER_CLOCK_HZ / 2.0
+            )));
+        }
+        Ok(self)
+    }
+}
+
+/// Actual RF and DSP frequencies selected for one receive tune.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RxTuneResult {
+    /// Logical center requested by the caller, in Hz.
+    pub requested_center_frequency_hz: f64,
+    /// Physical RF-LO frequency requested from the AD9361, in Hz.
+    pub target_rf_frequency_hz: f64,
+    /// Physical RF-LO frequency reached by the AD9361, in Hz.
+    pub actual_rf_frequency_hz: f64,
+    /// Frequency requested from the FPGA RX CORDIC, in Hz.
+    pub target_dsp_frequency_hz: f64,
+    /// Quantized FPGA RX CORDIC frequency, in Hz.
+    pub actual_dsp_frequency_hz: f64,
+    /// Resulting logical receive-stream center, in Hz.
+    pub actual_center_frequency_hz: f64,
+}
+
 impl RxConfig {
     /// Validate and normalize this configuration without accessing hardware.
     pub fn validate(self) -> Result<Self> {
@@ -123,6 +194,8 @@ pub struct B2xxReceiver {
     identity: B2xxIdentity,
     product: Product,
     center_frequency_hz: f64,
+    rf_frequency_hz: f64,
+    dsp_frequency_hz: f64,
     sample_rate_hz: f64,
     gain: RxGain,
     host_scale: f32,
@@ -172,6 +245,8 @@ impl std::fmt::Debug for B2xxReceiver {
             .field("identity", &self.identity)
             .field("product", &self.product)
             .field("center_frequency_hz", &self.center_frequency_hz)
+            .field("rf_frequency_hz", &self.rf_frequency_hz)
+            .field("dsp_frequency_hz", &self.dsp_frequency_hz)
             .field("sample_rate_hz", &self.sample_rate_hz)
             .field("gain", &self.gain)
             .field("streaming", &self.streaming)
@@ -191,6 +266,8 @@ impl B2xxReceiver {
             identity,
             product,
             center_frequency_hz: config.center_frequency_hz,
+            rf_frequency_hz: config.center_frequency_hz,
+            dsp_frequency_hz: 0.0,
             sample_rate_hz: config.sample_rate_hz,
             gain: config.gain,
             host_scale: 1.0,
@@ -222,6 +299,18 @@ impl B2xxReceiver {
         self.center_frequency_hz
     }
 
+    /// Return the physical AD9361 receive-LO frequency.
+    #[must_use]
+    pub const fn rf_frequency_hz(&self) -> f64 {
+        self.rf_frequency_hz
+    }
+
+    /// Return the FPGA RX CORDIC frequency.
+    #[must_use]
+    pub const fn dsp_frequency_hz(&self) -> f64 {
+        self.dsp_frequency_hz
+    }
+
     #[must_use]
     pub const fn sample_rate_hz(&self) -> f64 {
         self.sample_rate_hz
@@ -232,15 +321,45 @@ impl B2xxReceiver {
         self.gain
     }
 
-    /// Retune the AD9361 receive synthesizer and B200 RF filter selection.
+    /// Retune to a logical zero-IF center frequency.
     pub async fn set_center_frequency(&mut self, frequency_hz: f64) -> Result<f64> {
-        validate_range("center frequency", frequency_hz, MIN_RF_HZ, MAX_RF_HZ)?;
+        Ok(self
+            .tune(RxTuneRequest::new(frequency_hz))
+            .await?
+            .actual_center_frequency_hz)
+    }
+
+    /// Retune the AD9361 receive synthesizer and FPGA DDC as one logical tune.
+    pub async fn tune(&mut self, request: RxTuneRequest) -> Result<RxTuneResult> {
+        let request = request.validate()?;
+        let target_rf_frequency_hz = request.center_frequency_hz + request.lo_offset_hz;
         self.control.set_stream(StreamId::LocalControl);
-        let misc = receiver_misc_word(frequency_hz);
+        let misc = receiver_misc_word(target_rf_frequency_hz);
         self.control.poke32(SR_CORE_MISC, misc).await?;
-        let actual = self.radio.tune_rx(&mut self.control, frequency_hz).await?;
-        self.center_frequency_hz = actual;
-        Ok(actual)
+        let actual_rf_frequency_hz = self
+            .radio
+            .tune_rx(&mut self.control, target_rf_frequency_hz)
+            .await?;
+        let target_dsp_frequency_hz = actual_rf_frequency_hz - request.center_frequency_hz;
+        let (actual_dsp_frequency_hz, frequency_word) =
+            ddc_frequency_word(target_dsp_frequency_hz)?;
+        self.control.set_stream(StreamId::RadioControl(0));
+        self.control
+            .poke32(RX_DSP_FREQUENCY, frequency_word)
+            .await?;
+        let actual_center_frequency_hz = actual_rf_frequency_hz - actual_dsp_frequency_hz;
+
+        self.center_frequency_hz = actual_center_frequency_hz;
+        self.rf_frequency_hz = actual_rf_frequency_hz;
+        self.dsp_frequency_hz = actual_dsp_frequency_hz;
+        Ok(RxTuneResult {
+            requested_center_frequency_hz: request.center_frequency_hz,
+            target_rf_frequency_hz,
+            actual_rf_frequency_hz,
+            target_dsp_frequency_hz,
+            actual_dsp_frequency_hz,
+            actual_center_frequency_hz,
+        })
     }
 
     /// Set the FPGA DDC rate. The nearest supported integer decimation is used.
@@ -254,7 +373,10 @@ impl B2xxReceiver {
         let (actual_rate, decimation_word, host_scale) = ddc_settings(sample_rate_hz)?;
         self.control.set_stream(StreamId::RadioControl(0));
         self.control.poke32(RX_DSP_MUX, 0).await?;
-        self.control.poke32(RX_DSP_FREQUENCY, 0).await?;
+        let (_, frequency_word) = ddc_frequency_word(self.dsp_frequency_hz)?;
+        self.control
+            .poke32(RX_DSP_FREQUENCY, frequency_word)
+            .await?;
         self.control
             .poke32(RX_DSP_DECIMATION, decimation_word)
             .await?;
@@ -399,6 +521,26 @@ fn receiver_misc_word(frequency_hz: f64) -> u32 {
     band | (1 << 6)
 }
 
+/// Quantize an RX CORDIC frequency to the signed 32-bit FPGA phase word.
+fn ddc_frequency_word(requested_hz: f64) -> Result<(f64, u32)> {
+    if !requested_hz.is_finite() || requested_hz.abs() >= MASTER_CLOCK_HZ / 2.0 {
+        return Err(Error::InvalidArgument(format!(
+            "RX DSP frequency must be finite and have magnitude below {}",
+            MASTER_CLOCK_HZ / 2.0
+        )));
+    }
+    const SCALE: f64 = 4_294_967_296.0;
+    let scaled = (requested_hz / MASTER_CLOCK_HZ * SCALE).round();
+    if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
+        return Err(Error::InvalidArgument(
+            "RX DSP frequency cannot be represented by the CORDIC".into(),
+        ));
+    }
+    let signed_word = scaled as i32;
+    let actual_hz = f64::from(signed_word) / SCALE * MASTER_CLOCK_HZ;
+    Ok((actual_hz, signed_word as u32))
+}
+
 fn ddc_settings(requested_rate: f64) -> Result<(f64, u32, (f32, u32))> {
     let decimation = (MASTER_CLOCK_HZ / requested_rate).round() as u32;
     if !(1..=512).contains(&decimation) {
@@ -502,6 +644,37 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn validates_low_if_tune_requests() {
+        let request = RxTuneRequest::with_lo_offset(100e6, 3.6e6);
+        assert_eq!(request.validate().unwrap(), request);
+        assert!(
+            RxTuneRequest::with_lo_offset(70e6, -1.0)
+                .validate()
+                .is_err()
+        );
+        assert!(RxTuneRequest::with_lo_offset(6e9, 1.0).validate().is_err());
+        assert!(
+            RxTuneRequest::with_lo_offset(100e6, 8e6)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            RxTuneRequest::with_lo_offset(100e6, f64::NAN)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn quantizes_signed_cordic_frequencies() {
+        assert_eq!(ddc_frequency_word(1e6).unwrap(), (1e6, 0x1000_0000));
+        assert_eq!(ddc_frequency_word(-1e6).unwrap(), (-1e6, 0xf000_0000));
+        let (actual, word) = ddc_frequency_word(123_456.789).unwrap();
+        assert!((actual - 123_456.789).abs() < 0.002);
+        assert_ne!(word, 0);
     }
 
     #[test]
