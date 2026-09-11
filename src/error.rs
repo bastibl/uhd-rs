@@ -3,6 +3,25 @@ use std::time::Duration;
 /// Errors returned by the pure-Rust UHD implementation.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("a stream or control operation still owns the device")]
+    Busy,
+    #[error("device shutdown has started")]
+    Shutdown,
+    #[error("RX stream is stopped or failed")]
+    StreamClosed,
+    #[error("operation timed out")]
+    Timeout,
+    #[error("image {0} is required; enable embedded-images or supply bytes on DeviceBuilder")]
+    MissingImage(&'static str),
+    #[error(
+        "request WebUSB permission again and select the reconnected device from a user gesture"
+    )]
+    PermissionRequired,
+    #[error("reopen the browser device before claiming another RX stream")]
+    ReopenRequired,
+    #[error("WebUSB: {0}")]
+    Browser(String),
+
     #[error("USB error: {0}")]
     Usb(#[from] nusb::Error),
 
@@ -55,7 +74,7 @@ pub enum Error {
     },
 
     #[error(
-        "firmware compatibility mismatch: device is {actual_major}.{actual_minor}, host requires {expected_major}.{expected_minor}"
+        "firmware compatibility mismatch: device is {actual_major}.{actual_minor}, host requires {expected_major}.{expected_minor}; use DeviceBuilder::reload_firmware(true) to reload"
     )]
     FirmwareCompatibility {
         expected_major: u8,

@@ -5,7 +5,7 @@
 //! AD9364 before applying the requested stream configuration.
 
 use super::{B2xxDevice, B2xxIdentity, Product, RadioControl, StreamId, ad9361::Ad9361Controller};
-use crate::{Error, Result, chdr};
+use crate::{Error, Result};
 
 const MASTER_CLOCK_HZ: f64 = 16_000_000.0;
 const MIN_RF_HZ: f64 = 70_000_000.0;
@@ -15,7 +15,6 @@ const MAX_SAMPLE_RATE_HZ: f64 = MASTER_CLOCK_HZ;
 const MIN_GAIN_DB: f64 = 0.0;
 const MAX_GAIN_DB: f64 = 76.0;
 const SAMPLES_PER_PACKET: u32 = 1_000;
-const DATA_TRANSFER_BYTES: usize = 16_384;
 
 // Local settings registers, in byte-address form.
 const SR_CORE_MISC: u32 = 16 * 4;
@@ -43,8 +42,8 @@ const RX_DSP_SCALE_IQ: u32 = SR_RX_DSP + 4;
 const RX_DSP_DECIMATION: u32 = SR_RX_DSP + 8;
 const RX_DSP_MUX: u32 = SR_RX_DSP + 12;
 
-const RX_DATA_STREAM_ID: u32 = 0x0000_00a0;
-const RX_CONTEXT_OVERFLOW: u8 = 0x08;
+pub(crate) const RX_DATA_STREAM_ID: u32 = 0x0000_00a0;
+pub(crate) const RX_CONTEXT_OVERFLOW: u8 = 0x08;
 
 // ATR state for frontend 1 (RF B on B200/B210), using RX2.
 const SFDX1_RX: u32 = 1 << 6;
@@ -166,29 +165,10 @@ impl RxConfig {
     }
 }
 
-/// One normalized complex `f32` receive sample.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Complex32 {
-    pub re: f32,
-    pub im: f32,
-}
-
-impl Complex32 {
-    #[must_use]
-    pub const fn new(re: f32, im: f32) -> Self {
-        Self { re, im }
-    }
-}
-
-/// Metadata and samples returned by one B2xx receive packet.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RxPacket {
-    pub timestamp: Option<u64>,
-    pub samples: Vec<Complex32>,
-}
+pub use num_complex::Complex32;
 
 /// Continuous channel-zero receive stream from a B200.
-pub struct B2xxReceiver {
+pub(crate) struct B2xxReceiver {
     control: RadioControl,
     radio: Ad9361Controller,
     identity: B2xxIdentity,
@@ -199,12 +179,12 @@ pub struct B2xxReceiver {
     sample_rate_hz: f64,
     gain: RxGain,
     host_scale: f32,
-    sequence_state: RxSequenceState,
     streaming: bool,
+    device: B2xxDevice,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RxSequenceState {
+pub(crate) enum RxSequenceState {
     /// Ignore packets queued before writing the stream ID reset the FPGA's
     /// sequence counter. The first packet from the new stream is sequence zero.
     Synchronizing,
@@ -212,14 +192,14 @@ enum RxSequenceState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SequenceDisposition {
+pub(crate) enum SequenceDisposition {
     Discard,
     Accept,
     Overflow { expected: u16, actual: u16 },
 }
 
 impl RxSequenceState {
-    fn observe(&mut self, actual: u16) -> SequenceDisposition {
+    pub(crate) fn observe(&mut self, actual: u16) -> SequenceDisposition {
         match *self {
             Self::Synchronizing if actual != 0 => SequenceDisposition::Discard,
             Self::Synchronizing => {
@@ -254,13 +234,35 @@ impl std::fmt::Debug for B2xxReceiver {
     }
 }
 
+struct OpeningReceiver(Option<B2xxReceiver>);
+impl Drop for OpeningReceiver {
+    fn drop(&mut self) {
+        if let Some(mut receiver) = self.0.take() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = crate::operation::blocking(crate::operation::bounded(
+                    receiver.stop(),
+                    std::time::Duration::from_secs(2),
+                ));
+            }
+            #[cfg(target_arch = "wasm32")]
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ =
+                    crate::operation::bounded(receiver.stop(), std::time::Duration::from_secs(2))
+                        .await;
+                let _ = receiver.terminal_close().await;
+            });
+        }
+    }
+}
+
 impl B2xxReceiver {
     /// Open and configure a B200, including AD9364 cold-start initialization.
     pub async fn open(device: B2xxDevice, config: RxConfig) -> Result<Self> {
         let config = config.validate()?;
         let session = device.open_session().await?;
-        let (control, identity, product, radio) = session.into_radio_parts()?;
-        let mut receiver = Self {
+        let (control, identity, product, radio, device) = session.into_radio_parts()?;
+        let receiver = Self {
             control,
             radio,
             identity,
@@ -271,54 +273,19 @@ impl B2xxReceiver {
             sample_rate_hz: config.sample_rate_hz,
             gain: config.gain,
             host_scale: 1.0,
-            sequence_state: RxSequenceState::Synchronizing,
-            streaming: false,
+            device,
+            streaming: true, // Explicitly stop any reception inherited from a prior owner.
         };
+        let mut opening = OpeningReceiver(Some(receiver));
+        let receiver = opening.0.as_mut().unwrap();
+        receiver.stop().await?;
         receiver.configure_frontend().await?;
         receiver.set_sample_rate(config.sample_rate_hz).await?;
         receiver
             .set_center_frequency(config.center_frequency_hz)
             .await?;
         receiver.set_gain(config.gain).await?;
-        receiver.start().await?;
-        Ok(receiver)
-    }
-
-    #[must_use]
-    pub const fn identity(&self) -> &B2xxIdentity {
-        &self.identity
-    }
-
-    #[must_use]
-    pub const fn product(&self) -> Product {
-        self.product
-    }
-
-    #[must_use]
-    pub const fn center_frequency_hz(&self) -> f64 {
-        self.center_frequency_hz
-    }
-
-    /// Return the physical AD9361 receive-LO frequency.
-    #[must_use]
-    pub const fn rf_frequency_hz(&self) -> f64 {
-        self.rf_frequency_hz
-    }
-
-    /// Return the FPGA RX CORDIC frequency.
-    #[must_use]
-    pub const fn dsp_frequency_hz(&self) -> f64 {
-        self.dsp_frequency_hz
-    }
-
-    #[must_use]
-    pub const fn sample_rate_hz(&self) -> f64 {
-        self.sample_rate_hz
-    }
-
-    #[must_use]
-    pub const fn gain(&self) -> RxGain {
-        self.gain
+        Ok(opening.0.take().unwrap())
     }
 
     /// Retune to a logical zero-IF center frequency.
@@ -405,6 +372,7 @@ impl B2xxReceiver {
 
     /// Start or restart continuous immediate reception.
     pub async fn start(&mut self) -> Result<()> {
+        self.streaming = true; // Cleanup must stop even a cancelled partial start.
         self.control.set_stream(StreamId::RadioControl(0));
         self.control.poke32(SR_RX_FMT, 2).await?;
         self.control
@@ -417,7 +385,6 @@ impl B2xxReceiver {
         // Setting the stream ID resets the FPGA sequence counter. WebUSB may
         // still have packets from an earlier stream queued, so receive() waits
         // for sequence zero before exposing samples or checking continuity.
-        self.sequence_state = RxSequenceState::Synchronizing;
         self.streaming = true;
         Ok(())
     }
@@ -432,54 +399,14 @@ impl B2xxReceiver {
         Ok(())
     }
 
-    /// Receive and decode the next non-context CHDR packet.
-    pub async fn receive(&mut self) -> Result<RxPacket> {
-        if !self.streaming {
-            return Err(Error::InvalidArgument(
-                "receive called while the B2xx stream is stopped".into(),
-            ));
-        }
-        loop {
-            let transfer = self
-                .control
-                .transport_mut()
-                .receive_data(DATA_TRANSFER_BYTES)
-                .await?;
-            let packet = chdr::parse(&transfer)?;
-            if packet.stream_id != RX_DATA_STREAM_ID {
-                return Err(Error::Chdr(format!(
-                    "unexpected receive stream ID 0x{:08x}",
-                    packet.stream_id
-                )));
-            }
-            if packet.context {
-                let code = receive_context_code(packet.payload)?;
-                if code == RX_CONTEXT_OVERFLOW {
-                    // Reset the framer sequence as part of restarting. Any
-                    // packets already queued before the overflow are then
-                    // discarded by the normal startup synchronization path.
-                    self.start().await?;
-                    return Err(Error::DeviceReceiveOverflow {
-                        sequence: packet.sequence,
-                    });
-                }
-                return Err(Error::ReceiveContext {
-                    code,
-                    sequence: packet.sequence,
-                });
-            }
-            match self.sequence_state.observe(packet.sequence) {
-                SequenceDisposition::Discard => continue,
-                SequenceDisposition::Accept => {}
-                SequenceDisposition::Overflow { expected, actual } => {
-                    return Err(Error::ReceiveOverflow { expected, actual });
-                }
-            }
-            return Ok(RxPacket {
-                timestamp: packet.timestamp,
-                samples: decode_fc32(packet.payload, self.host_scale)?,
-            });
-        }
+    pub(crate) fn host_scale(&self) -> f32 {
+        self.host_scale
+    }
+    pub(crate) fn transport_mut(&mut self) -> &mut super::B2xxTransport {
+        self.control.transport_mut()
+    }
+    pub(crate) async fn terminal_close(&self) -> Result<()> {
+        self.device.terminal_close().await
     }
 
     async fn configure_frontend(&mut self) -> Result<()> {
@@ -493,7 +420,7 @@ impl B2xxReceiver {
     }
 }
 
-fn receive_context_code(payload: &[u8]) -> Result<u8> {
+pub(crate) fn receive_context_code(payload: &[u8]) -> Result<u8> {
     let word = payload
         .get(..4)
         .ok_or_else(|| Error::Chdr("receive context packet has no context word".into()))?;
@@ -592,7 +519,7 @@ async fn issue_stream_command(control: &mut RadioControl, command: StreamCommand
     control.poke32(RX_CTRL_TIME_LOW, 0).await
 }
 
-fn decode_fc32(bytes: &[u8], scale: f32) -> Result<Vec<Complex32>> {
+pub(crate) fn decode_fc32(bytes: &[u8], scale: f32) -> Result<Vec<Complex32>> {
     if bytes.len() % 8 != 0 {
         return Err(Error::Chdr(format!(
             "fc32 receive payload has {} bytes, not a whole number of complex samples",

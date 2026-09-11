@@ -128,6 +128,8 @@ pub struct B2xxDevice {
     info: B2xxDeviceInfo,
     usb: nusb::Device,
     control: nusb::Interface,
+    #[cfg(target_arch = "wasm32")]
+    browser: crate::browser_usb::BrowserHandle,
 }
 
 impl std::fmt::Debug for B2xxDevice {
@@ -147,9 +149,26 @@ impl B2xxDevice {
                 product_id: info.product_id,
             });
         }
-        let usb = info.nusb_info().open().await?;
-        let control = usb.detach_and_claim_interface(0).await?;
-        Ok(Self { info, usb, control })
+        #[cfg(target_arch = "wasm32")]
+        let browser = crate::browser_usb::BrowserHandle::find(&info).await?;
+        #[cfg(target_arch = "wasm32")]
+        let usb = nusb::Device::from_js(browser.device.clone()).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let usb = crate::operation::usb(info.nusb_info().open()).await?;
+        let control = crate::operation::usb(usb.detach_and_claim_interface(0)).await?;
+        Ok(Self {
+            info,
+            usb,
+            control,
+            #[cfg(target_arch = "wasm32")]
+            browser,
+        })
+    }
+
+    pub(crate) async fn terminal_close(&self) -> Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        self.browser.close().await?;
+        Ok(())
     }
 
     #[must_use]
@@ -203,6 +222,9 @@ impl B2xxDevice {
     /// Load a Cypress FX3 Intel HEX image. The USB device normally
     /// re-enumerates after the execute record, invalidating this handle.
     pub async fn load_firmware(&self, image: &[u8]) -> Result<()> {
+        crate::operation::bounded(self.load_firmware_inner(image), Duration::from_secs(30)).await
+    }
+    async fn load_firmware_inner(&self, image: &[u8]) -> Result<()> {
         if self.info.firmware_loaded {
             return Err(Error::InvalidArgument(
                 "FX3 firmware can only be loaded while the device is in its bootloader".into(),
@@ -235,11 +257,15 @@ impl B2xxDevice {
 
     /// Load a raw B2xx FPGA bitstream through FX3 vendor requests.
     pub async fn load_fpga(&self, image: &[u8], force: bool) -> Result<LoadOutcome> {
+        crate::operation::bounded(self.load_fpga_inner(image, force), Duration::from_secs(60)).await
+    }
+    async fn load_fpga_inner(&self, image: &[u8], force: bool) -> Result<LoadOutcome> {
         if image.is_empty() {
             return Err(Error::InvalidArgument("FPGA image is empty".into()));
         }
         let hash = image_hash(image);
-        if !force && self.fpga_hash().await? == hash {
+        if !force && self.fpga_hash().await? == hash && self.fx3_state().await? == Fx3State::Running
+        {
             return Ok(LoadOutcome::AlreadyLoaded);
         }
 
@@ -391,6 +417,11 @@ impl B2xxDevice {
         super::B2xxSession::start(self, fpga_image, force).await
     }
 
+    /// Validate a running FPGA without initializing a radio. Supports all B2xx products.
+    pub async fn open_fpga_session(self) -> Result<super::B2xxSession> {
+        super::B2xxSession::open(self).await
+    }
+
     /// Open an already-running FPGA and cold-start the B200 radio.
     pub async fn open_session(self) -> Result<super::B2xxSession> {
         let mut session = super::B2xxSession::open(self).await?;
@@ -399,7 +430,7 @@ impl B2xxDevice {
     }
 
     async fn wait_for_state(&self, expected: Fx3State, timeout: Duration) -> Result<()> {
-        let mut remaining = timeout;
+        let deadline = web_time::Instant::now() + timeout;
         loop {
             let actual = self.fx3_state().await?;
             if actual == expected {
@@ -408,12 +439,13 @@ impl B2xxDevice {
             if matches!(actual, Fx3State::Error | Fx3State::Undefined) {
                 return Err(Error::Fx3State(actual));
             }
-            if remaining.is_zero() {
+            if web_time::Instant::now() >= deadline {
                 return Err(Error::Fx3Timeout { expected, timeout });
             }
-            let delay = remaining.min(POLL_INTERVAL);
+            let delay = deadline
+                .saturating_duration_since(web_time::Instant::now())
+                .min(POLL_INTERVAL);
             Delay::new(delay).await;
-            remaining = remaining.saturating_sub(delay);
         }
     }
 
@@ -434,20 +466,18 @@ impl B2xxDevice {
     ) -> Result<Vec<u8>> {
         let length = u16::try_from(length)
             .map_err(|_| Error::InvalidArgument("control transfer is too large".into()))?;
-        let bytes = self
-            .control
-            .control_in(
-                ControlIn {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request,
-                    value,
-                    index,
-                    length,
-                },
-                timeout,
-            )
-            .await?;
+        let bytes = crate::operation::usb(self.control.control_in(
+            ControlIn {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Device,
+                request,
+                value,
+                index,
+                length,
+            },
+            crate::operation::remaining(timeout)?,
+        ))
+        .await?;
         if bytes.len() != usize::from(length) {
             return Err(Error::ShortTransfer {
                 expected: usize::from(length),
@@ -470,19 +500,18 @@ impl B2xxDevice {
                 "control transfer is too large".into(),
             ));
         }
-        self.control
-            .control_out(
-                ControlOut {
-                    control_type: ControlType::Vendor,
-                    recipient: Recipient::Device,
-                    request,
-                    value,
-                    index,
-                    data,
-                },
-                timeout,
-            )
-            .await?;
+        crate::operation::usb(self.control.control_out(
+            ControlOut {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Device,
+                request,
+                value,
+                index,
+                data,
+            },
+            crate::operation::remaining(timeout)?,
+        ))
+        .await?;
         Ok(())
     }
 }

@@ -4,14 +4,16 @@ pub(crate) mod ad9361;
 mod ad9361_tables;
 mod device;
 mod fx3;
-mod rx;
+pub(crate) mod rx;
 mod session;
 mod spi;
 mod transport;
 
 pub use device::{B2xxDeviceInfo, list_devices, request_device};
-pub use fx3::{B2xxDevice, B2xxIdentity, FirmwareCompatibility, Fx3State, LoadOutcome, UsbSpeed};
-pub use rx::{B2xxReceiver, Complex32, RxConfig, RxGain, RxPacket, RxTuneRequest, RxTuneResult};
+pub use fx3::{
+    B2xxDevice, B2xxIdentity, FirmwareCompatibility, Fx3State, LoadOutcome, UsbSpeed, image_hash,
+};
+pub use rx::{RxConfig, RxGain, RxTuneRequest, RxTuneResult};
 pub use session::{B2xxSession, FpgaCompatibility};
 pub use spi::{Ad9361Io, B2xxSpi, SpiConfig, SpiEdge};
 pub use transport::{B2xxTransport, RadioControl, StreamId};
@@ -101,4 +103,17 @@ impl std::fmt::Display for Product {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.name())
     }
+}
+
+/// Load firmware and reconnect on the same physical port (or authorized browser serial).
+/// Explicit reload resets compatible running firmware as well. Images are validated first.
+pub fn load_firmware_and_reconnect(
+    info: B2xxDeviceInfo,
+    images: &crate::images::ImageCatalog,
+    reload: bool,
+    timeout: std::time::Duration,
+) -> impl nusb::MaybeFuture<Output = crate::Result<B2xxDevice>> + '_ {
+    crate::operation::operation(crate::high_level::prepare_firmware(
+        info, images, reload, timeout,
+    ))
 }

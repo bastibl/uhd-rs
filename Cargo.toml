@@ -5,8 +5,8 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["Thomas Habets <thomas@habets.se>"]
 repository = "https://github.com/ThomasHabets/uhd-pure"
-readme = "README.md"
 keywords = ["SDR", "radio"]
+include = ["src/**", "examples/**", "tests/**", "images/**", "scripts/**", "Cargo.toml", "Cargo.lock", "README.md", "VALIDATION.md", "LICENSE", ".cargo/config.toml"]
 # License same as libuhd, because likely derivative work.
 license = "GPL-3.0-or-later"
 description = "A pure Rust UHD-compatible driver, initially targeting USRP B2xx over native USB and WebUSB"
@@ -15,21 +15,34 @@ description = "A pure Rust UHD-compatible driver, initially targeting USRP B2xx 
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = []
-wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+default = ["embedded-images"]
+embedded-images = ["dep:rust-embed"]
+smol = ["nusb/smol"]
+tokio = ["nusb/tokio"]
+hardware-tests = []
+wasm = []
 
 [dependencies]
 futures-lite = "2.6"
 futures-timer = { version = "3.0", features = ["wasm-bindgen"] }
-nusb = { version = "0.2.7", features = ["smol"] }
+nusb = "0.2.7"
+num-complex = "0.4"
+async-lock = "3.4"
+web-time = "1.1"
+rust-embed = { version = "8.12", optional = true, features = ["debug-embed", "compression", "deterministic-timestamps"] }
 thiserror = "2.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Navigator", "Usb", "UsbDevice"] }
+wasm-bindgen-futures = "0.4"
 
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
 all = "warn"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

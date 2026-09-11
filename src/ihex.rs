@@ -27,6 +27,9 @@ pub fn parse(input: &[u8]) -> Result<Vec<Segment>> {
         if line.is_empty() {
             continue;
         }
+        if saw_eof {
+            return ihex_error(line_number, "record after EOF");
+        }
         let bytes = decode_record(line, line_number)?;
         let length = usize::from(bytes[0]);
         let address = u16::from_be_bytes([bytes[1], bytes[2]]);
@@ -52,7 +55,6 @@ pub fn parse(input: &[u8]) -> Result<Vec<Segment>> {
                     return ihex_error(line_number, "EOF record must have address and length zero");
                 }
                 saw_eof = true;
-                break;
             }
             0x04 => {
                 if address != 0 || data.len() != 2 {

@@ -1,0 +1,11 @@
+Source: https://github.com/EttusResearch/uhd/blob/7f7d016/firmware/fx3/b200/firmware/b200_main.c
+Copyright 2013-2015 Ettus Research LLC
+Copyright 2019 Ettus Research, a National Instruments Brand
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Source: https://github.com/EttusResearch/uhd/blob/7f7d016/firmware/fx3/b200/bootloader/main.c
+Copyright 2011-2012 Cypress Semiconductor Corporation
+Copyright 2019 Ettus Research, a National Instruments Brand
+SPDX-License-Identifier: GPL-3.0-or-later
+
+The complete GPLv3 text is included in UHD-LICENSE.md.

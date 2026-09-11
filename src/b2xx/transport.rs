@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use futures_lite::future;
-use futures_timer::Delay;
 use nusb::transfer::{Buffer, Bulk, In, Out};
 
 use crate::{Error, Result, chdr};
@@ -51,7 +49,7 @@ impl StreamId {
 pub struct B2xxTransport {
     control_in: nusb::Endpoint<Bulk, In>,
     control_out: nusb::Endpoint<Bulk, Out>,
-    data_in: nusb::Endpoint<Bulk, In>,
+    data_in: Option<nusb::Endpoint<Bulk, In>>,
     data_out: nusb::Endpoint<Bulk, Out>,
 }
 
@@ -60,27 +58,28 @@ impl std::fmt::Debug for B2xxTransport {
         formatter
             .debug_struct("B2xxTransport")
             .field("control_in_packet_size", &self.control_in.max_packet_size())
-            .field("data_in_packet_size", &self.data_in.max_packet_size())
+            .field(
+                "data_in_packet_size",
+                &self.data_in.as_ref().map(|ep| ep.max_packet_size()),
+            )
             .finish_non_exhaustive()
     }
 }
 
 impl B2xxTransport {
     pub(crate) async fn open(device: &nusb::Device) -> Result<Self> {
-        let data_out_interface = device
-            .detach_and_claim_interface(DATA_OUT_INTERFACE)
-            .await?;
-        let data_in_interface = device.detach_and_claim_interface(DATA_IN_INTERFACE).await?;
-        let control_out_interface = device
-            .detach_and_claim_interface(CONTROL_OUT_INTERFACE)
-            .await?;
-        let control_in_interface = device
-            .detach_and_claim_interface(CONTROL_IN_INTERFACE)
-            .await?;
+        let data_out_interface =
+            crate::operation::usb(device.detach_and_claim_interface(DATA_OUT_INTERFACE)).await?;
+        let data_in_interface =
+            crate::operation::usb(device.detach_and_claim_interface(DATA_IN_INTERFACE)).await?;
+        let control_out_interface =
+            crate::operation::usb(device.detach_and_claim_interface(CONTROL_OUT_INTERFACE)).await?;
+        let control_in_interface =
+            crate::operation::usb(device.detach_and_claim_interface(CONTROL_IN_INTERFACE)).await?;
 
         Ok(Self {
             data_out: data_out_interface.endpoint::<Bulk, Out>(DATA_OUT_ENDPOINT)?,
-            data_in: data_in_interface.endpoint::<Bulk, In>(DATA_IN_ENDPOINT)?,
+            data_in: Some(data_in_interface.endpoint::<Bulk, In>(DATA_IN_ENDPOINT)?),
             control_out: control_out_interface.endpoint::<Bulk, Out>(CONTROL_OUT_ENDPOINT)?,
             control_in: control_in_interface.endpoint::<Bulk, In>(CONTROL_IN_ENDPOINT)?,
         })
@@ -115,13 +114,21 @@ impl B2xxTransport {
     /// aligned size here. See the repository README for the resulting streaming
     /// limitation.
     pub async fn receive_data(&mut self, requested_length: usize) -> Result<Vec<u8>> {
-        let packet_size = self.data_in.max_packet_size();
+        let endpoint = self.data_in.as_mut().ok_or(Error::Busy)?;
+        let packet_size = endpoint.max_packet_size();
         if requested_length == 0 || requested_length % packet_size != 0 {
             return Err(Error::InvalidArgument(format!(
                 "nusb requires the IN length to be a nonzero multiple of endpoint packet size {packet_size}"
             )));
         }
-        transfer_in(&mut self.data_in, requested_length).await
+        transfer_in(endpoint, requested_length).await
+    }
+
+    pub(crate) fn take_sample_endpoint(&mut self) -> Result<nusb::Endpoint<Bulk, In>> {
+        self.data_in.take().ok_or(Error::Busy)
+    }
+    pub(crate) fn return_sample_endpoint(&mut self, endpoint: nusb::Endpoint<Bulk, In>) {
+        self.data_in = Some(endpoint);
     }
 
     #[must_use]
@@ -213,14 +220,20 @@ impl RadioControl {
         );
         self.transport.send_control(request).await?;
 
+        let deadline = web_time::Instant::now() + CONTROL_RESPONSE_TIMEOUT;
         loop {
-            let response = future::race(self.transport.receive_control(), async {
-                Delay::new(CONTROL_RESPONSE_TIMEOUT).await;
-                Err(Error::ControlTimeout {
-                    timeout: CONTROL_RESPONSE_TIMEOUT,
-                })
-            })
-            .await;
+            let remaining = deadline.saturating_duration_since(web_time::Instant::now());
+            let response = crate::operation::bounded(self.transport.receive_control(), remaining)
+                .await
+                .map_err(|error| {
+                    if matches!(error, Error::Timeout) {
+                        Error::ControlTimeout {
+                            timeout: CONTROL_RESPONSE_TIMEOUT,
+                        }
+                    } else {
+                        error
+                    }
+                });
             let response = match response {
                 Ok(response) => response,
                 Err(error @ Error::ControlTimeout { .. }) => {
@@ -254,7 +267,7 @@ impl RadioControl {
 async fn transfer_out(endpoint: &mut nusb::Endpoint<Bulk, Out>, bytes: Vec<u8>) -> Result<()> {
     let expected = bytes.len();
     endpoint.submit(bytes.into());
-    let completion = endpoint.next_complete().await;
+    let completion = crate::operation::completion(endpoint, CONTROL_RESPONSE_TIMEOUT).await?;
     completion.status?;
     if completion.actual_len != expected {
         return Err(Error::ShortTransfer {
@@ -269,8 +282,10 @@ async fn transfer_in(
     endpoint: &mut nusb::Endpoint<Bulk, In>,
     requested_length: usize,
 ) -> Result<Vec<u8>> {
-    endpoint.submit(Buffer::new(requested_length));
-    let completion = endpoint.next_complete().await;
+    if endpoint.pending() == 0 {
+        endpoint.submit(Buffer::new(requested_length));
+    }
+    let completion = crate::operation::completion(endpoint, CONTROL_RESPONSE_TIMEOUT).await?;
     completion.status?;
     Ok(completion.buffer.into_vec())
 }

@@ -1,0 +1,48 @@
+[
+  {
+    "target": "b2xx_b200_fpga_default",
+    "revision": "uhd-c37b318",
+    "url": "https://files.ettus.com/binaries/cache/b2xx/uhd-c37b318/b2xx_b200_fpga_default-gc37b318.zip",
+    "sha256": "35542b8a2b6a6dfd3aa155c35364af85c2599cfb692b0cf94013c5342c945448",
+    "files": {
+      "usrp_b200_fpga.bin": "a485d88ed8949290eba16ac4714e0da443d47dd05458c8bcf9f1bcd07280b852"
+    }
+  },
+  {
+    "target": "b2xx_b200mini_fpga_default",
+    "revision": "uhd-c37b318",
+    "url": "https://files.ettus.com/binaries/cache/b2xx/uhd-c37b318/b2xx_b200mini_fpga_default-gc37b318.zip",
+    "sha256": "c1865c6e574cf453a688c6bfb8fe5e3646cd53458ae403cf11d3eeb7dc6a9918",
+    "files": {
+      "usrp_b200mini_fpga.bin": "737103d5d06dbc8fa04db25a96e5778e876a55a1928119cc45f36f7d84e8a820"
+    }
+  },
+  {
+    "target": "b2xx_b210_fpga_default",
+    "revision": "uhd-c37b318",
+    "url": "https://files.ettus.com/binaries/cache/b2xx/uhd-c37b318/b2xx_b210_fpga_default-gc37b318.zip",
+    "sha256": "ab1cdbe93090fdcf590a79cbe938749f8a5fbd7b45422b7833b8c841aa2106b4",
+    "files": {
+      "usrp_b210_fpga.bin": "148a5a08ebe2a22147e0e7ec1d78f5453bba83468163978abb171ea78d84a777"
+    }
+  },
+  {
+    "target": "b2xx_b205mini_fpga_default",
+    "revision": "uhd-c37b318",
+    "url": "https://files.ettus.com/binaries/cache/b2xx/uhd-c37b318/b2xx_b205mini_fpga_default-gc37b318.zip",
+    "sha256": "dce96120e3512d6e21bb061811c4021cbc90ac4d787248ad821337b7389ff3c4",
+    "files": {
+      "usrp_b205mini_fpga.bin": "f4da0becf906af957c954a7a1c276aa91f79ca369d7aedf7c2f5c7fdebf4c351"
+    }
+  },
+  {
+    "target": "b2xx_common_fw_default",
+    "revision": "uhd-7f7d016",
+    "url": "https://files.ettus.com/binaries/cache/b2xx/uhd-7f7d016/b2xx_common_fw_default-g7f7d016.zip",
+    "sha256": "22ac0e54cc90d53d8494d481439447a0c89b9bbaced6fabe24df260eda3ce3a3",
+    "files": {
+      "usrp_b200_fw.hex": "cc8e4bc968d91d1a67c63871ce5b2c1613c49676fe363bf2f6e336059899ae5c",
+      "usrp_b200_bl.img": "365a70342fa79ab766c4df7f78713055f0eebcd1c68588b806a19dbbf97d0b48"
+    }
+  }
+]

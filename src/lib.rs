@@ -1,22 +1,27 @@
-//! A pure Rust implementation of the host side of UHD.
+//! Pure Rust B2xx discovery, image loading and owned B200 RX streams.
 //!
-//! The first supported hardware family is the USB-connected USRP B2xx. The
-//! transport is asynchronous from the bottom up so the same code can run on
-//! native hosts through `nusb` and in a browser through `WebUSB`.
+//! [`Device::builder`] prepares a radio without starting reception. Claim an
+//! [`RxStream`], explicitly start it, and read [`Complex32`] samples into your
+//! own buffers. Operations implement [`MaybeFuture`]: `.wait()` natively or
+//! `.await` natively and in wasm. Close streams and shut down devices explicitly
+//! to observe cleanup errors; drop also attempts cleanup.
 //!
-//! This crate currently provides device discovery, `WebUSB` permission requests,
-//! FX3 and FPGA image loading, motherboard EEPROM identity, raw B2xx bulk
-//! transport, CHDR packet framing, Wishbone register access, and pure-Rust
-//! AD9364 cold-start initialization for revision 5 or newer B200 hardware. The
-//! higher-level APIs include automatic radio initialization and channel-zero
-//! receive streaming.
+//! The default `embedded-images` feature includes all six pinned UHD B2xx
+//! images. Radio support is B200 revision 5+, RX channel zero. The [`b2xx`]
+//! module retains image loading and diagnostics for all B2xx models.
 
 pub mod b2xx;
 pub mod chdr;
 mod error;
 pub mod ihex;
 
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-mod wasm;
-
+mod high_level;
+pub mod images;
+mod operation;
+pub use b2xx::{RxConfig, RxGain, RxTuneRequest, RxTuneResult};
 pub use error::{Error, Result};
+pub use high_level::{Device, DeviceBuilder, DeviceDescriptor, RxStream, StreamingStats};
+pub use num_complex::Complex32;
+pub use nusb::MaybeFuture;
+#[cfg(target_arch = "wasm32")]
+mod browser_usb;

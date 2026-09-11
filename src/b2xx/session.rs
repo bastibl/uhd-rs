@@ -175,11 +175,23 @@ impl B2xxSession {
 
     pub(crate) fn into_radio_parts(
         self,
-    ) -> Result<(RadioControl, B2xxIdentity, Product, Ad9361Controller)> {
+    ) -> Result<(
+        RadioControl,
+        B2xxIdentity,
+        Product,
+        Ad9361Controller,
+        B2xxDevice,
+    )> {
         let radio = self.radio.ok_or(Error::Unsupported(
             "the B2xx session radio has not been initialized",
         ))?;
-        Ok((self.control, self.identity, self.product, radio))
+        Ok((
+            self.control,
+            self.identity,
+            self.product,
+            radio,
+            self.device,
+        ))
     }
 }
 

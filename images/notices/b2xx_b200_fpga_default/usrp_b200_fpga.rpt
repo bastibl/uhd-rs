@@ -1,0 +1,38 @@
+========================================================================
+Device utilization summary:
+---------------------------
+
+Selected Device : 6slx75fgg484-3 
+
+
+Slice Logic Utilization: 
+ Number of Slice Registers:           19055  out of  93296    20%  
+ Number of Slice LUTs:                20549  out of  46648    44%  
+    Number used as Logic:             17358  out of  46648    37%  
+    Number used as Memory:             3191  out of  11072    28%  
+       Number used as RAM:              828
+       Number used as SRL:             2363
+
+Slice Logic Distribution: 
+ Number of LUT Flip Flop pairs used:  28217
+   Number with an unused Flip Flop:    9162  out of  28217    32%  
+   Number with an unused LUT:          7668  out of  28217    27%  
+   Number of fully used LUT-FF pairs: 11387  out of  28217    40%  
+   Number of unique control sets:       492
+
+IO Utilization: 
+ Number of IOs:                         172
+ Number of bonded IOBs:                 155  out of    280    55%  
+    IOB Flip Flops/Latches:             132
+
+Specific Feature Utilization:
+ Number of Block RAM/FIFO:              156  out of    172    90%  
+    Number using Block RAM only:        156
+ Number of BUFG/BUFGCTRLs:                4  out of     16    25%  
+ Number of DSP48A1s:                     76  out of    132    57%  
+
+========================================================================
+Timing Summary:
+
+All constraints were met.
+========================================================================

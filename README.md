@@ -1,108 +1,109 @@
 # uhd-pure
 
-`uhd-pure` is a pure Rust host driver for Ettus/National Instruments USRPs. Its
-USB path uses [`nusb`](https://crates.io/crates/nusb), including nusb's WebUSB
-backend, instead of linking to libusb or the C++ UHD library.
+A pure Rust USRP B2xx driver using [nusb](https://crates.io/crates/nusb), without libusb or C++ UHD. Native and browser applications use the same Rust API.
 
-The implemented B2xx foundation currently includes:
+Radio support is **B200 revision 5+ RX, channel zero, RX2**. B210, B200mini and B205mini support discovery, firmware/FPGA loading and diagnostics; their radio initialization, TX and multichannel streaming are not implemented.
 
-- native discovery and browser WebUSB permission requests;
-- Cypress FX3 Intel HEX firmware loading;
-- B200/B210/B200mini/B205mini FPGA loading and image hash checks;
-- FX3 state, compatibility, USB-speed, and motherboard EEPROM queries;
-- all four FPGA bulk endpoints;
-- CHDR packet encoding/decoding;
-- checked FPGA sessions plus local/radio Wishbone register transactions;
-- the B2xx SPI core with raw AD9361 register reads and writes;
-- pure-Rust B200 AD9364 cold-start initialization, calibration, and digital
-  interface loopback verification; and
-- continuous channel-zero B200 receive streaming, tuning, FPGA DDC rate
-  selection, manual/automatic gain, CHDR validation, and normalized `f32` IQ.
+## Owned devices and streams
 
-Radio initialization and the receive API currently target a revision 5 or newer
-B200/AD9364. B210/mini radio initialization, transmit streaming, and
-multi-channel operation are not implemented yet, so this should not be
-considered a drop-in replacement for the whole C++ `multi_usrp` API.
+```rust,no_run
+use std::time::Duration;
+use uhd_pure::{Complex32, Device, MaybeFuture};
 
-## Native diagnostic CLI
-
-```console
-cargo run -- list
-cargo run -- probe
-cargo run -- load-firmware /usr/share/uhd/images/usrp_b200_fw.hex
-cargo run -- load-fpga /usr/share/uhd/images/usrp_b200_fpga.bin
-cargo run -- init-radio
-cargo run -- peek 0x50
+# fn main() -> uhd_pure::Result<()> {
+let mut device = Device::builder().open().wait()?;
+let mut rx = device.rx_stream()?;
+rx.start().wait()?;
+let mut samples = [Complex32::default(); 4096];
+let count = rx.read(&mut samples, Some(Duration::from_secs(2))).wait()?;
+println!("Received {count} samples");
+rx.stop().wait()?;
+rx.start().wait()?;
+let stats = rx.close().wait()?;
+device.shutdown().wait()?;
+# Ok(())
+# }
 ```
 
-Pass a serial number as the last argument when more than one B2xx is attached.
-Firmware and FPGA image files remain external inputs; they are not vendored.
+Opening prepares the radio at 100 MHz, 1 MS/s and manual gain 30 dB; it does not start RX. Discovery (`Device::list`), opening, configuration, stream operations and shutdown are lazy `MaybeFuture` operations: call `.wait()` natively, or `.await` natively/in wasm. Dropping an unpolled ordinary operation does nothing. Native futures are `Send`. The default native blocking API needs no async runtime. Optional `smol` and `tokio` features enable nusb's executor integration; with neither enabled, nusb discovery/open/interface/control operations use native blocking paths even when awaited. The shared radio algorithms do not depend on an executor.
 
-The native fixed-frequency receive example captures 10 seconds at 100 MHz and
-1 MS/s into headerless, interleaved, little-endian `f32` IQ data:
+Select a device with `.serial("...")` or `.descriptor(descriptor)`. Configure with builder methods `.frequency_hz(...)`, `.sample_rate_hz(...)`, `.gain(RxGain::Manual(...))`, `.gain(RxGain::Automatic)` and `.lo_offset_hz(...)`. After opening, use `set_center_frequency`, `tune(RxTuneRequest::with_lo_offset(...))`, `set_sample_rate` and `set_gain`. Tune and rate operations return actual quantized values. The FPGA DDC uses a 16 MHz master clock and supported integer decimation.
+
+An `RxStream` owns its sample endpoint and persistent queue of 16 × 16,384-byte transfers. Ordinary reads do not acquire the radio control lock. Reads return available samples promptly, keep unread samples for the next call, and return `Error::Timeout` when no samples arrive before the deadline. CHDR loss and device overflow are recovered internally and counted in `StreamingStats`; malformed packets and fatal USB errors invalidate the stream. `None` waits indefinitely. `stop` retains the queue, and restart discards stale packets and resets CHDR synchronization.
+
+Close streams explicitly to observe cleanup errors. `close` consumes the stream and returns an owned lazy operation; dropping or cancelling it still attempts cleanup. `shutdown` returns `Busy` while any stream (including a pending close) owns the claim. Once shutdown starts, configuration and new claims are disabled. Cleanup failures can be retried; successful shutdown is idempotent. A stream remains usable after dropping its `Device`. Final-owner drop attempts bounded synchronous cleanup natively and background cleanup in a browser.
+
+## Images and startup
+
+The default `embedded-images` feature embeds six assets in debug and release builds, including wasm and Cargo packages: the FX3 firmware, available bootloader, and B200/B210/B200mini/B205mini FPGA binaries. `rust-embed` uses `debug-embed`, compression and deterministic timestamps. Builds perform no image downloads and need no runtime image directory.
+
+The pinned UHD 4.8 image set uses FPGA revision `c37b318` and firmware revision `7f7d016`. Archive/file checksums, source URLs, upstream notices and the maintainer refresh procedure are in [images/README.md](images/README.md).
+
+Opening loads firmware if needed, reconnects, reads motherboard identity, selects the corresponding FPGA and validates compatibility before radio initialization. Compatible running firmware is reused. Use `.reload_firmware(true)` to explicitly reload firmware; malformed firmware is rejected before resetting a working device. FPGA loading is skipped only when the selected image hash matches and FX3 reports it running. Opening never installs the bootloader.
+
+Override individual assets with `.image(Image::Firmware, bytes)` or supply an `ImageCatalog` with `.images(catalog)`. Overrides take precedence over embedded bytes. With `default-features = false`, supply any image that must be loaded. A running FPGA with the pinned catalog hash may be reused without its bytes.
+
+Native reconnection matches the original physical connector and known running-device serial. Linux USB 2/3 companion ports are resolved through the kernel's `peer` links. There is no fallback to an unrelated device. Set `.reconnect_timeout(Duration::from_secs(...))` to change the default 10-second deadline.
+
+## Rust in a browser
+
+Use this crate as a Rust dependency in your wasm application. The former JavaScript wrapper and `/web` probe page have been removed. The legacy `wasm` feature is an empty compatibility feature; the target selects WebUSB automatically.
+
+```rust,no_run
+# #[cfg(target_arch = "wasm32")]
+# async fn example() -> uhd_pure::Result<()> {
+use uhd_pure::Device;
+// Poll from a click/tap handler so the permission chooser has user activation.
+let selected = Device::request_permission().await?
+    .ok_or(uhd_pure::Error::PermissionRequired)?;
+let mut device = Device::builder().descriptor(selected).open().await?;
+let rx = device.rx_stream()?;
+rx.close().await?;
+device.shutdown().await?;
+# Ok(())
+# }
+```
+
+WebUSB requires a secure browser-window context. Set `--cfg=web_sys_unstable_apis` in the **application's** wasm Rust flags; dependencies' `.cargo/config.toml` files are not inherited. This repository supplies it for local builds:
+
+```console
+cargo check --target wasm32-unknown-unknown --all-targets
+```
+
+Permission requests are separate from opening. If a re-enumerated device cannot be identified among authorized devices, opening returns `Error::PermissionRequired`; request a new user gesture and select it again. Devices without a known serial cannot safely be matched across browser reconnection.
+
+Stopping RX leaves the browser USB device open. After closing or losing a stream that submitted transfers, `rx_stream` returns `ReopenRequired`: call `shutdown`, then open a new `Device`. WebUSB cannot cancel individual transfers. Terminal shutdown awaits the retained browser `UsbDevice.close()`, aborting pending operations and releasing interfaces. Drop cleanup retains ownership until its background attempt finishes.
+
+## Examples and diagnostics
 
 ```console
 cargo run --release --example rx_100mhz -- capture.fc32
+cargo run --features smol --example rx_async
+cargo run -- list
+cargo run -- probe
+cargo run -- load-firmware images/assets/usrp_b200_fw.hex
+cargo run -- load-fpga images/assets/usrp_b210_fpga.bin
+cargo run -- peek 0x50
 ```
 
-The example targets a revision 5 or newer B200. It cold-starts and calibrates
-the AD9364, verifies its digital interface, performs the 100 MHz retune, and
-sets up the FPGA receive stream automatically.
+The capture example writes ten seconds of headerless interleaved little-endian `f32` IQ. Both examples close the stream and shut down the device explicitly, including after a receive error. Pass a serial after diagnostic command arguments when multiple devices are connected. `b2xx::load_firmware_and_reconnect` and `B2xxDevice::open_fpga_session` expose image/reconnection and checked local-control diagnostics without initializing an unsupported radio. Radio-register loopback needs the radio clock initialized.
 
-## WebUSB
+B2xx normally uses unaligned 8176/16360-byte IN requests. nusb 0.2.7 requires requests aligned to endpoint packet size; the driver retains the existing 16384-byte workaround and accepts short completions. This limitation still needs B200 hardware RX validation.
 
-Build the `cdylib` with the JS-facing wrapper enabled:
+## Migration and verification
+
+Replace `B2xxReceiver::open`/`receive` and `RxPacket` with `Device::builder().open`, `rx_stream`, explicit `start`, and `read(&mut [Complex32], timeout)`. Samples are `num_complex::Complex32`. Configuration belongs to `Device`; data and queue ownership belong to `RxStream`. Replace dropping a JavaScript wrapper with explicit Rust `close` and `shutdown`.
+
+Run `python3 scripts/check.py` for the native/wasm feature matrix. Browser tests use `wasm-bindgen-test-runner` and ChromeDriver; see [VALIDATION.md](VALIDATION.md). Physical hardware tests are opt-in, ignored by default, and should run serially:
 
 ```console
-wasm-pack build --target web --dev --out-dir web/pkg . -- --features wasm
-cp /usr/share/uhd/images/usrp_b200_fw.hex web/pkg/
-cp /usr/share/uhd/images/usrp_b200_fpga.bin web/pkg/
-python3 -m http.server 8000 --directory web
+cargo test --features hardware-tests --test hardware -- --ignored --test-threads=1 --nocapture
 ```
 
-Call `B2xxDevice.request()` directly from a click/tap handler because browsers
-require transient user activation for the WebUSB chooser. The checked-in Cargo
-target configuration enables the unstable `web-sys` WebUSB bindings required
-by nusb.
-
-`web/index.html` is a small device/firmware/FPGA/register probe that exercises
-the generated bindings at `http://localhost:8000`. By default the page downloads
-`usrp_b200_fw.hex` and `usrp_b200_fpga.bin` from the same `web/pkg` directory as
-`uhd_pure_bg.wasm`; the file picker can override the FPGA image.  Loading the
-FPGA from the page also initializes and verifies the radio.
-
-Applications can call `initializeRadio()` explicitly, while the Rust
-`B2xxReceiver::open()` and session startup paths do so automatically.
-
-Firmware and FPGA images are external build/deployment assets and are not
-checked into this repository. Click **Release B200 for another app** (or call
-the generated wasm-bindgen object's `free()` method) before opening the device
-from another page or a native process; the WebUSB handle otherwise keeps its
-interfaces claimed.
-
-## B2xx receive transfer sizing
-
-UHD deliberately requests B2xx sample IN transfers of 8176 or 16360 bytes. The
-length must be 8-byte aligned but *not* aligned to the USB maximum packet size,
-which avoids an FX3 failure mode. nusb 0.2.7 currently rejects all IN transfer
-lengths that are not a multiple of the endpoint maximum packet size, including
-on WebUSB.
-
-The receive API submits an aligned 16384-byte buffer and accepts the short
-transfer produced when a B2xx frame ends. An upstream nusb API that permits the
-traditional unaligned request length would avoid relying on this short-transfer
-behavior. This repository does not vendor or patch nusb.
+Run only tests appropriate for the attached model. Set `UHD_PURE_SERIAL` when necessary. `UHD_PURE_RELOAD_FIRMWARE=1` makes the B2xx diagnostic test exercise a cold firmware reload. The B200 test includes RX restart/cancellation/reopening; optionally set `UHD_PURE_HANDOFF_COMMAND` to an executable that opens the released device in another application.
 
 ## License
 
-GPL-3.0-or-later, matching UHD. This crate should be considered a derivative
-work of UHD, as LLM has clearly looked closely at the code. For the full story
-on ownership and license see [the UHD
-code](https://github.com/EttusResearch/uhd), and/or [the host
-directory](https://github.com/EttusResearch/uhd/blob/master/host/LICENSE).
+[GPL-3.0-or-later](LICENSE), matching UHD's host driver. Embedded image notices and corresponding-source links are documented separately in [images/README.md](images/README.md).
 
-If any alternative license for UHD is obtained, as mentioned by the UHD license,
-then the authors of this crate agree to the same license without asking for any
-compensation. "You get this crate for free" if you make such a deal.
-
-But if you're happy with GPL 3.0 or later, then that's all you need to know.
+If an alternative UHD license is obtained as described by UHD, the authors agree to the same license for this crate without additional compensation.
