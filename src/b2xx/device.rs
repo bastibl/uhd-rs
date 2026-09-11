@@ -120,7 +120,7 @@ fn physical_port_key(device: &std::path::Path, port: u8) -> Option<std::path::Pa
 mod tests {
     #[test]
     fn companion_ports_share_identity_but_unrelated_ports_do_not() {
-        let root = std::env::temp_dir().join(format!("uhd-pure-ports-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("uhd-rs-ports-{}", std::process::id()));
         let a = root.join("usb1/1-0:1.0/usb1-port9");
         let b = root.join("usb2/2-0:1.0/usb2-port5");
         for path in [

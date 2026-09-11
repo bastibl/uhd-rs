@@ -1,11 +1,11 @@
 //! Shared Rust async API; call receive() from your native or browser executor.
 use std::time::Duration;
-use uhd_pure::{Complex32, Device};
-async fn receive() -> uhd_pure::Result<()> {
+use uhd_rs::{Complex32, Device};
+async fn receive() -> uhd_rs::Result<()> {
     // On wasm, first call Device::request_permission().await from a user gesture.
     let mut device = Device::builder().open().await?;
     let mut rx = device.rx_stream()?;
-    let result: uhd_pure::Result<()> = async {
+    let result: uhd_rs::Result<()> = async {
         rx.start().await?;
         let mut samples = [Complex32::default(); 4096];
         let count = rx.read(&mut samples, Some(Duration::from_secs(2))).await?;
@@ -23,7 +23,7 @@ async fn receive() -> uhd_pure::Result<()> {
     shutdown
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> uhd_pure::Result<()> {
+fn main() -> uhd_rs::Result<()> {
     futures_lite::future::block_on(receive())
 }
 #[cfg(target_arch = "wasm32")]

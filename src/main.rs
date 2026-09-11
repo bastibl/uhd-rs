@@ -10,8 +10,8 @@ fn main() {
 fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn run() -> uhd_pure::Result<()> {
-    use uhd_pure::b2xx::{self, StreamId};
+async fn run() -> uhd_rs::Result<()> {
+    use uhd_rs::b2xx::{self, StreamId};
 
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "list".into());
@@ -52,8 +52,8 @@ async fn run() -> uhd_pure::Result<()> {
             | "ad9361-read"
             | "loopback"
     ) {
-        return Err(uhd_pure::Error::InvalidArgument(format!(
-            "unknown command {command:?}; run `uhd-pure help`"
+        return Err(uhd_rs::Error::InvalidArgument(format!(
+            "unknown command {command:?}; run `uhd-rs help`"
         )));
     }
     if command == "load-firmware" {
@@ -101,8 +101,8 @@ async fn run() -> uhd_pure::Result<()> {
         }
         "init-radio" => {
             if arguments.len() > 1 {
-                return Err(uhd_pure::Error::InvalidArgument(
-                    "usage: uhd-pure init-radio [serial]".into(),
+                return Err(uhd_rs::Error::InvalidArgument(
+                    "usage: uhd-rs init-radio [serial]".into(),
                 ));
             }
             let session = device.open_session().await?;
@@ -144,7 +144,7 @@ async fn run() -> uhd_pure::Result<()> {
                 .first()
                 .map_or(Ok(0), |value| parse_u8(value, "radio channel"))?;
             if channel > 1 {
-                return Err(uhd_pure::Error::InvalidArgument(
+                return Err(uhd_rs::Error::InvalidArgument(
                     "radio channel must be 0 or 1".into(),
                 ));
             }
@@ -155,7 +155,7 @@ async fn run() -> uhd_pure::Result<()> {
                 control.poke32(0x54, pattern).await?;
                 let actual = control.peek32(0).await?;
                 if actual != pattern {
-                    return Err(uhd_pure::Error::InvalidArgument(format!(
+                    return Err(uhd_rs::Error::InvalidArgument(format!(
                         "loopback mismatch: wrote 0x{pattern:08x}, read 0x{actual:08x}"
                     )));
                 }
@@ -168,14 +168,14 @@ async fn run() -> uhd_pure::Result<()> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn load_firmware(arguments: &[String]) -> uhd_pure::Result<()> {
-    use uhd_pure::{
+async fn load_firmware(arguments: &[String]) -> uhd_rs::Result<()> {
+    use uhd_rs::{
         b2xx,
         images::{Image, ImageCatalog},
     };
     if arguments.len() > 2 {
-        return Err(uhd_pure::Error::InvalidArgument(
-            "usage: uhd-pure load-firmware <firmware.hex> [serial]".into(),
+        return Err(uhd_rs::Error::InvalidArgument(
+            "usage: uhd-rs load-firmware <firmware.hex> [serial]".into(),
         ));
     }
     let path = required_argument(arguments, 0, "firmware Intel HEX path")?;
@@ -190,28 +190,28 @@ async fn load_firmware(arguments: &[String]) -> uhd_pure::Result<()> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn require_running(device: &uhd_pure::b2xx::B2xxDevice) -> uhd_pure::Result<()> {
+async fn require_running(device: &uhd_rs::b2xx::B2xxDevice) -> uhd_rs::Result<()> {
     let state = device.fx3_state().await?;
-    if state != uhd_pure::b2xx::Fx3State::Running {
-        return Err(uhd_pure::Error::Fx3State(state));
+    if state != uhd_rs::b2xx::Fx3State::Running {
+        return Err(uhd_rs::Error::Fx3State(state));
     }
     Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn select_device(serial: Option<&str>) -> uhd_pure::Result<uhd_pure::b2xx::B2xxDeviceInfo> {
-    let devices = uhd_pure::b2xx::list_devices().await?;
+async fn select_device(serial: Option<&str>) -> uhd_rs::Result<uhd_rs::b2xx::B2xxDeviceInfo> {
+    let devices = uhd_rs::b2xx::list_devices().await?;
     if let Some(serial) = serial {
         devices
             .into_iter()
             .find(|device| device.serial_number.as_deref() == Some(serial))
-            .ok_or(uhd_pure::Error::DeviceNotFound)
+            .ok_or(uhd_rs::Error::DeviceNotFound)
     } else if devices.len() == 1 {
         Ok(devices.into_iter().next().expect("one device"))
     } else if devices.is_empty() {
-        Err(uhd_pure::Error::DeviceNotFound)
+        Err(uhd_rs::Error::DeviceNotFound)
     } else {
-        Err(uhd_pure::Error::InvalidArgument(
+        Err(uhd_rs::Error::InvalidArgument(
             "multiple B2xx devices found; pass the serial number after the command arguments"
                 .into(),
         ))
@@ -223,40 +223,40 @@ fn required_argument<'a>(
     arguments: &'a [String],
     index: usize,
     description: &str,
-) -> uhd_pure::Result<&'a str> {
+) -> uhd_rs::Result<&'a str> {
     arguments
         .get(index)
         .map(String::as_str)
-        .ok_or_else(|| uhd_pure::Error::InvalidArgument(format!("missing required {description}")))
+        .ok_or_else(|| uhd_rs::Error::InvalidArgument(format!("missing required {description}")))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_number(value: &str) -> uhd_pure::Result<u32> {
+fn parse_number(value: &str) -> uhd_rs::Result<u32> {
     let parsed = if let Some(hex) = value.strip_prefix("0x") {
         u32::from_str_radix(hex, 16)
     } else {
         value.parse()
     };
-    parsed.map_err(|_| uhd_pure::Error::InvalidArgument(format!("invalid number {value:?}")))
+    parsed.map_err(|_| uhd_rs::Error::InvalidArgument(format!("invalid number {value:?}")))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_u16(value: &str) -> uhd_pure::Result<u16> {
+fn parse_u16(value: &str) -> uhd_rs::Result<u16> {
     u16::try_from(parse_number(value)?).map_err(|_| {
-        uhd_pure::Error::InvalidArgument(format!("number does not fit in 16 bits: {value:?}"))
+        uhd_rs::Error::InvalidArgument(format!("number does not fit in 16 bits: {value:?}"))
     })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_u8(value: &str, description: &str) -> uhd_pure::Result<u8> {
+fn parse_u8(value: &str, description: &str) -> uhd_rs::Result<u8> {
     u8::try_from(parse_number(value)?).map_err(|_| {
-        uhd_pure::Error::InvalidArgument(format!("{description} does not fit in 8 bits: {value:?}"))
+        uhd_rs::Error::InvalidArgument(format!("{description} does not fit in 8 bits: {value:?}"))
     })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn print_help() {
     println!(
-        "uhd-pure commands:\n  list\n  probe [serial]\n  load-firmware <usrp_b200_fw.hex> [serial]\n  load-fpga <usrp_b2xx_fpga.bin> [serial] [--force]\n  init-radio [serial]\n  peek <byte-address> [serial]\n  poke <byte-address> <value> [serial]\n  ad9361-read <register> [serial]\n  loopback [channel] [serial]"
+        "uhd-rs commands:\n  list\n  probe [serial]\n  load-firmware <usrp_b200_fw.hex> [serial]\n  load-fpga <usrp_b2xx_fpga.bin> [serial] [--force]\n  init-radio [serial]\n  peek <byte-address> [serial]\n  poke <byte-address> <value> [serial]\n  ad9361-read <register> [serial]\n  loopback [channel] [serial]"
     );
 }

@@ -1,17 +1,17 @@
 //! Explicit opt-in; run one hardware test at a time with --ignored --test-threads=1.
 #![cfg(all(feature = "hardware-tests", not(target_arch = "wasm32")))]
 use std::time::Duration;
-use uhd_pure::{
+use uhd_rs::{
     Complex32, Device, MaybeFuture,
     b2xx::{self},
     images::{Image, ImageCatalog},
 };
 fn descriptor() -> b2xx::B2xxDeviceInfo {
     let mut devices = Device::list().wait().unwrap();
-    if let Ok(serial) = std::env::var("UHD_PURE_SERIAL") {
+    if let Ok(serial) = std::env::var("UHD_RS_SERIAL") {
         devices.retain(|d| d.serial_number.as_deref() == Some(&serial));
     }
-    assert_eq!(devices.len(), 1, "connect one B2xx or set UHD_PURE_SERIAL");
+    assert_eq!(devices.len(), 1, "connect one B2xx or set UHD_RS_SERIAL");
     devices.pop().unwrap()
 }
 #[test]
@@ -22,7 +22,7 @@ fn b2xx_startup_images_and_diagnostics() {
         let device = b2xx::load_firmware_and_reconnect(
             descriptor(),
             &images,
-            std::env::var_os("UHD_PURE_RELOAD_FIRMWARE").is_some(),
+            std::env::var_os("UHD_RS_RELOAD_FIRMWARE").is_some(),
             Duration::from_secs(10),
         )
         .await
@@ -92,7 +92,7 @@ fn b200_cold_receive_restart_cancel_and_reopen() {
     }
     drop(rx);
     device.shutdown().wait().unwrap();
-    if let Ok(program) = std::env::var("UHD_PURE_HANDOFF_COMMAND") {
+    if let Ok(program) = std::env::var("UHD_RS_HANDOFF_COMMAND") {
         assert!(
             std::process::Command::new(program)
                 .status()
@@ -105,9 +105,7 @@ fn b200_cold_receive_restart_cancel_and_reopen() {
 #[ignore = "requires B210; verifies the supported-radio boundary after automatic startup"]
 fn b210_high_level_rejects_unsupported_radio_and_releases_usb() {
     let result = Device::builder().descriptor(descriptor()).open().wait();
-    assert!(
-        matches!(result,Err(uhd_pure::Error::Unsupported(message)) if message.contains("B200"))
-    );
+    assert!(matches!(result,Err(uhd_rs::Error::Unsupported(message)) if message.contains("B200")));
     let device = descriptor().open().wait().unwrap();
     futures_lite::future::block_on(device.check_firmware_compatibility()).unwrap();
     let session = futures_lite::future::block_on(device.open_fpga_session()).unwrap();

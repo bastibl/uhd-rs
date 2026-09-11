@@ -6,14 +6,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         io::{BufWriter, Write},
         time::Duration,
     };
-    use uhd_pure::{Complex32, Device, MaybeFuture};
+    use uhd_rs::{Complex32, Device, MaybeFuture};
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "capture.fc32".into());
     let mut output = BufWriter::new(OpenOptions::new().write(true).create_new(true).open(path)?);
     let mut device = Device::builder().open().wait()?;
     let mut rx = device.rx_stream()?;
-    let capture = (|| -> uhd_pure::Result<()> {
+    let capture = (|| -> uhd_rs::Result<()> {
         rx.start().wait()?;
         let mut samples = [Complex32::default(); 4096];
         let mut remaining = 10_000_000;

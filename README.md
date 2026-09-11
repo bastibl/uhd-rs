@@ -1,4 +1,4 @@
-# uhd-pure
+# uhd-rs
 
 A pure Rust USRP B2xx driver using [nusb](https://crates.io/crates/nusb), without libusb or C++ UHD. Native and browser applications use the same Rust API.
 
@@ -8,9 +8,9 @@ Radio support is **B200 revision 5+ RX, channel zero, RX2**. B210, B200mini and 
 
 ```rust,no_run
 use std::time::Duration;
-use uhd_pure::{Complex32, Device, MaybeFuture};
+use uhd_rs::{Complex32, Device, MaybeFuture};
 
-# fn main() -> uhd_pure::Result<()> {
+# fn main() -> uhd_rs::Result<()> {
 let mut device = Device::builder().open().wait()?;
 let mut rx = device.rx_stream()?;
 rx.start().wait()?;
@@ -51,11 +51,11 @@ Use this crate as a Rust dependency in your wasm application. The former JavaScr
 
 ```rust,no_run
 # #[cfg(target_arch = "wasm32")]
-# async fn example() -> uhd_pure::Result<()> {
-use uhd_pure::Device;
+# async fn example() -> uhd_rs::Result<()> {
+use uhd_rs::Device;
 // Poll from a click/tap handler so the permission chooser has user activation.
 let selected = Device::request_permission().await?
-    .ok_or(uhd_pure::Error::PermissionRequired)?;
+    .ok_or(uhd_rs::Error::PermissionRequired)?;
 let mut device = Device::builder().descriptor(selected).open().await?;
 let rx = device.rx_stream()?;
 rx.close().await?;
@@ -100,7 +100,7 @@ Run `cargo test --all-targets` for the native test suite. Browser tests use `was
 cargo test --features hardware-tests --test hardware -- --ignored --test-threads=1 --nocapture
 ```
 
-Run only tests appropriate for the attached model. Set `UHD_PURE_SERIAL` when necessary. `UHD_PURE_RELOAD_FIRMWARE=1` makes the B2xx diagnostic test exercise a cold firmware reload. The B200 test includes RX restart/cancellation/reopening; optionally set `UHD_PURE_HANDOFF_COMMAND` to an executable that opens the released device in another application.
+Run only tests appropriate for the attached model. Set `UHD_RS_SERIAL` when necessary. `UHD_RS_RELOAD_FIRMWARE=1` makes the B2xx diagnostic test exercise a cold firmware reload. The B200 test includes RX restart/cancellation/reopening; optionally set `UHD_RS_HANDOFF_COMMAND` to an executable that opens the released device in another application.
 
 ## License
 
