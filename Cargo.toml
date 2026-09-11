@@ -2,9 +2,9 @@
 name = "uhd-rs"
 version = "0.1.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Thomas Habets <thomas@habets.se>"]
-repository = "https://github.com/ThomasHabets/uhd-pure"
+repository = "https://github.com/bastibl/uhd-rs"
 keywords = ["SDR", "radio"]
 include = ["src/**", "examples/**", "tests/**", "images/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", ".cargo/config.toml"]
 # License same as libuhd, because likely derivative work.

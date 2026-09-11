@@ -1,5 +1,7 @@
 # uhd-rs
 
+[![CI](https://github.com/bastibl/uhd-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/bastibl/uhd-rs/actions/workflows/ci.yml)
+
 A pure Rust USRP B2xx driver using [nusb](https://crates.io/crates/nusb), without libusb or C++ UHD. Native and browser applications use the same Rust API.
 
 Radio support is **B200 revision 5+ RX, channel zero, RX2**. B210, B200mini and B205mini support discovery, firmware/FPGA loading and diagnostics; their radio initialization, TX and multichannel streaming are not implemented.
@@ -101,6 +103,10 @@ cargo test --features hardware-tests --test hardware -- --ignored --test-threads
 ```
 
 Run only tests appropriate for the attached model. Set `UHD_RS_SERIAL` when necessary. `UHD_RS_RELOAD_FIRMWARE=1` makes the B2xx diagnostic test exercise a cold firmware reload. The B200 test includes RX restart/cancellation/reopening; optionally set `UHD_RS_HANDOFF_COMMAND` to an executable that opens the released device in another application.
+
+## Releases
+
+The GitHub Actions release workflow publishes `uhd-rs` to crates.io and creates a GitHub release when a `v*` tag matches the crate version. Before tagging a release, configure a crates.io trusted publisher for repository `bastibl/uhd-rs` and workflow `release.yml`. CI runs native checks, browser lifecycle tests, and embedded-image/package verification on pushes and pull requests.
 
 ## License
 
