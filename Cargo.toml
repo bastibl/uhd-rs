@@ -1,15 +1,17 @@
 [package]
 name = "uhd-rs"
-version = "0.1.4"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-authors = ["Thomas Habets <thomas@habets.se>"]
-repository = "https://github.com/bastibl/uhd-rs"
-keywords = ["SDR", "radio"]
-include = ["src/**", "examples/**", "tests/**", "images/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", ".cargo/config.toml"]
+description = "Rust-native USRP B2xx RX driver built on nusb."
 # License same as libuhd, because likely derivative work.
 license = "GPL-3.0-or-later"
-description = "A pure Rust UHD-compatible driver, initially targeting USRP B2xx over native USB and WebUSB"
+readme = "README.md"
+documentation = "https://docs.rs/uhd-rs"
+repository = "https://github.com/bastibl/uhd-rs"
+keywords = ["usrp", "sdr", "usb", "nusb", "webusb"]
+categories = ["hardware-support", "asynchronous"]
+include = ["src/**", "examples/**", "tests/**", "images/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", ".cargo/config.toml"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
