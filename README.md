@@ -94,7 +94,7 @@ B2xx normally uses unaligned 8176/16360-byte IN requests. nusb 0.2.7 requires re
 
 Replace `B2xxReceiver::open`/`receive` and `RxPacket` with `Device::builder().open`, `rx_stream`, explicit `start`, and `read(&mut [Complex32], timeout)`. Samples are `num_complex::Complex32`. Configuration belongs to `Device`; data and queue ownership belong to `RxStream`. Replace dropping a JavaScript wrapper with explicit Rust `close` and `shutdown`.
 
-Run `python3 scripts/check.py` for the native/wasm feature matrix. Browser tests use `wasm-bindgen-test-runner` and ChromeDriver; see [VALIDATION.md](VALIDATION.md). Physical hardware tests are opt-in, ignored by default, and should run serially:
+Run `cargo test --all-targets` for the native test suite. Browser tests use `wasm-bindgen-test-runner` and ChromeDriver. Physical hardware tests are opt-in, ignored by default, and should run serially:
 
 ```console
 cargo test --features hardware-tests --test hardware -- --ignored --test-threads=1 --nocapture

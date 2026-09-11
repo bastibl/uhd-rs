@@ -6,7 +6,7 @@ rust-version = "1.85"
 authors = ["Thomas Habets <thomas@habets.se>"]
 repository = "https://github.com/ThomasHabets/uhd-pure"
 keywords = ["SDR", "radio"]
-include = ["src/**", "examples/**", "tests/**", "images/**", "scripts/**", "Cargo.toml", "Cargo.lock", "README.md", "VALIDATION.md", "LICENSE", ".cargo/config.toml"]
+include = ["src/**", "examples/**", "tests/**", "images/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", ".cargo/config.toml"]
 # License same as libuhd, because likely derivative work.
 license = "GPL-3.0-or-later"
 description = "A pure Rust UHD-compatible driver, initially targeting USRP B2xx over native USB and WebUSB"

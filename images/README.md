@@ -11,4 +11,4 @@ Corresponding source and build instructions:
 - [FX3 application notice](https://github.com/EttusResearch/uhd/blob/7f7d016/firmware/fx3/b200/firmware/b200_main.c)
 - [FX3 bootloader notice](https://github.com/EttusResearch/uhd/blob/7f7d016/firmware/fx3/b200/bootloader/main.c)
 
-Maintainers can run `python3 scripts/refresh-images.py` to fetch the pinned archives with curl, verify their SHA256 values, and regenerate the files and checksums. Updating the pinned revisions also requires updating `Image::pinned_hash` and its verification test. No Cargo build downloads images. The bootloader is a catalog asset only; opening a device never installs it.
+Maintainers can run `python3 images/refresh-images.py` to fetch the pinned archives with curl, verify their SHA256 values, and regenerate the files and checksums. Updating the pinned revisions also requires updating `Image::pinned_hash` and its verification test. No Cargo build downloads images. The bootloader is a catalog asset only; opening a device never installs it.
