@@ -478,11 +478,11 @@ fn ddc_settings(requested_rate: f64) -> Result<(f64, u32, (f32, u32))> {
     let mut cic_decimation = decimation;
     let mut halfband_small = 0;
     let mut halfband_large = 0;
-    if cic_decimation % 2 == 0 {
+    if cic_decimation.is_multiple_of(2) {
         halfband_small = 1;
         cic_decimation /= 2;
     }
-    if cic_decimation % 2 == 0 {
+    if cic_decimation.is_multiple_of(2) {
         halfband_large = 1;
         cic_decimation /= 2;
     }
@@ -520,14 +520,14 @@ async fn issue_stream_command(control: &mut RadioControl, command: StreamCommand
 }
 
 pub(crate) fn decode_fc32(bytes: &[u8], scale: f32) -> Result<Vec<Complex32>> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err(Error::Chdr(format!(
             "fc32 receive payload has {} bytes, not a whole number of complex samples",
             bytes.len()
         )));
     }
     let mut output = Vec::with_capacity(bytes.len() / 8);
-    for sample in bytes.chunks_exact(8) {
+    for sample in bytes.as_chunks::<8>().0 {
         let re = f32::from_le_bytes(sample[0..4].try_into().expect("four-byte float"));
         let im = f32::from_le_bytes(sample[4..8].try_into().expect("four-byte float"));
         output.push(Complex32::new(re * scale, im * scale));

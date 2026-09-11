@@ -112,26 +112,25 @@ async fn reconnect<B: Backend>(
                     .await?
                     .into_iter()
                     .filter(|i| backend.matches(key, i, firmware));
-                if let Some(info) = candidates.next() {
-                    if candidates.next().is_none() {
-                        match backend.open(info).await {
-                            Ok(device) => return Ok(device),
-                            // A USB node may appear before udev finishes applying permissions.
-                            Err(Error::Usb(error))
-                                if matches!(
-                                    error.kind(),
-                                    nusb::ErrorKind::PermissionDenied
-                                        | nusb::ErrorKind::NotFound
-                                        | nusb::ErrorKind::Disconnected
-                                ) => {}
-                            Err(Error::Io(error))
-                                if matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::PermissionDenied
-                                        | std::io::ErrorKind::NotFound
-                                ) => {}
-                            Err(error) => return Err(error),
-                        }
+                if let Some(info) = candidates.next()
+                    && candidates.next().is_none()
+                {
+                    match backend.open(info).await {
+                        Ok(device) => return Ok(device),
+                        // A USB node may appear before udev finishes applying permissions.
+                        Err(Error::Usb(error))
+                            if matches!(
+                                error.kind(),
+                                nusb::ErrorKind::PermissionDenied
+                                    | nusb::ErrorKind::NotFound
+                                    | nusb::ErrorKind::Disconnected
+                            ) => {}
+                        Err(Error::Io(error))
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                            ) => {}
+                        Err(error) => return Err(error),
                     }
                 }
                 futures_timer::Delay::new(Duration::from_millis(50)).await;

@@ -116,7 +116,7 @@ impl B2xxTransport {
     pub async fn receive_data(&mut self, requested_length: usize) -> Result<Vec<u8>> {
         let endpoint = self.data_in.as_mut().ok_or(Error::Busy)?;
         let packet_size = endpoint.max_packet_size();
-        if requested_length == 0 || requested_length % packet_size != 0 {
+        if requested_length == 0 || !requested_length.is_multiple_of(packet_size) {
             return Err(Error::InvalidArgument(format!(
                 "nusb requires the IN length to be a nonzero multiple of endpoint packet size {packet_size}"
             )));
@@ -176,7 +176,7 @@ impl RadioControl {
     }
 
     pub async fn poke32(&mut self, byte_address: u32, value: u32) -> Result<()> {
-        if byte_address % 4 != 0 {
+        if !byte_address.is_multiple_of(4) {
             return Err(Error::InvalidArgument(
                 "poke32 address must be 4-byte aligned".into(),
             ));
@@ -185,7 +185,7 @@ impl RadioControl {
     }
 
     pub async fn peek32(&mut self, byte_address: u32) -> Result<u32> {
-        if byte_address % 4 != 0 {
+        if !byte_address.is_multiple_of(4) {
             return Err(Error::InvalidArgument(
                 "peek32 address must be 4-byte aligned".into(),
             ));
@@ -200,7 +200,7 @@ impl RadioControl {
     }
 
     pub async fn peek64(&mut self, byte_address: u32) -> Result<u64> {
-        if byte_address % 8 != 0 {
+        if !byte_address.is_multiple_of(8) {
             return Err(Error::InvalidArgument(
                 "peek64 address must be 8-byte aligned".into(),
             ));
