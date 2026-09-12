@@ -1,5 +1,5 @@
 //! Board routing from UHD 4.8 b200_impl.cpp's frontend mapping and band selection.
-//! https://github.com/EttusResearch/uhd/blob/v4.8.0.0/host/lib/usrp/b200/b200_impl.cpp
+//! <https://github.com/EttusResearch/uhd/blob/v4.8.0.0/host/lib/usrp/b200/b200_impl.cpp>
 
 use super::Product;
 
