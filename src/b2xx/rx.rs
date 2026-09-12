@@ -1,20 +1,24 @@
-//! Receive streaming for a B200.
+//! Receive streaming for B200, B210, B200mini and B205mini.
 //!
 //! The current implementation configures channel zero, the `RX2` antenna,
-//! native `fc32` samples on the USB wire, the FPGA DDC, and cold-starts the
+//! packed `sc16` samples on the USB wire, the FPGA DDC, and cold-starts the
 //! AD9364 before applying the requested stream configuration.
 
+use super::ad9361::MASTER_CLOCK_HZ;
+use super::layout::RadioLayout;
 use super::{B2xxDevice, B2xxIdentity, Product, RadioControl, StreamId, ad9361::Ad9361Controller};
 use crate::{Error, Result};
 
-const MASTER_CLOCK_HZ: f64 = 16_000_000.0;
+const WLAN_CLOCK_HZ: f64 = 20_000_000.0;
 const MIN_RF_HZ: f64 = 70_000_000.0;
 const MAX_RF_HZ: f64 = 6_000_000_000.0;
 const MIN_SAMPLE_RATE_HZ: f64 = MASTER_CLOCK_HZ / 512.0;
-const MAX_SAMPLE_RATE_HZ: f64 = MASTER_CLOCK_HZ;
+const MAX_SAMPLE_RATE_HZ: f64 = WLAN_CLOCK_HZ;
 const MIN_GAIN_DB: f64 = 0.0;
 const MAX_GAIN_DB: f64 = 76.0;
-const SAMPLES_PER_PACKET: u32 = 1_000;
+// 16-byte timestamped CHDR header + sc16 payload = 16,360 bytes.
+// Stay below the FX3 frame limit and end with a short USB packet.
+pub(crate) const SAMPLES_PER_PACKET: u32 = 4_086;
 
 // Local settings registers, in byte-address form.
 const SR_CORE_MISC: u32 = 16 * 4;
@@ -45,7 +49,8 @@ const RX_DSP_MUX: u32 = SR_RX_DSP + 12;
 pub(crate) const RX_DATA_STREAM_ID: u32 = 0x0000_00a0;
 pub(crate) const RX_CONTEXT_OVERFLOW: u8 = 0x08;
 
-// ATR state for frontend 1 (RF B on B200/B210), using RX2.
+// Both frontends use the same ATR bit layout; SWAP_ATR routes radio 0
+// to the board-specific frontend, using RX2.
 const SFDX1_RX: u32 = 1 << 6;
 const SRX1_TX: u32 = 1 << 3;
 const LED_RX1: u32 = 1 << 2;
@@ -158,6 +163,7 @@ impl RxConfig {
             MIN_SAMPLE_RATE_HZ,
             MAX_SAMPLE_RATE_HZ,
         )?;
+        ddc_settings(self.sample_rate_hz, clock_for_rate(self.sample_rate_hz))?;
         if let RxGain::Manual(gain) = self.gain {
             validate_range("gain", gain, MIN_GAIN_DB, MAX_GAIN_DB)?;
         }
@@ -167,7 +173,7 @@ impl RxConfig {
 
 pub use num_complex::Complex32;
 
-/// Continuous channel-zero receive stream from a B200.
+/// Continuous channel-zero receive stream from a B2xx.
 pub(crate) struct B2xxReceiver {
     control: RadioControl,
     radio: Ad9361Controller,
@@ -177,6 +183,7 @@ pub(crate) struct B2xxReceiver {
     rf_frequency_hz: f64,
     dsp_frequency_hz: f64,
     sample_rate_hz: f64,
+    master_clock_hz: Option<f64>,
     gain: RxGain,
     host_scale: f32,
     streaming: bool,
@@ -257,7 +264,7 @@ impl Drop for OpeningReceiver {
 }
 
 impl B2xxReceiver {
-    /// Open and configure a B200, including AD9364 cold-start initialization.
+    /// Open and configure a B2xx, including AD9361/AD9364 cold-start initialization.
     pub async fn open(device: B2xxDevice, config: RxConfig) -> Result<Self> {
         let config = config.validate()?;
         let session = device.open_session().await?;
@@ -271,6 +278,7 @@ impl B2xxReceiver {
             rf_frequency_hz: config.center_frequency_hz,
             dsp_frequency_hz: 0.0,
             sample_rate_hz: config.sample_rate_hz,
+            master_clock_hz: Some(MASTER_CLOCK_HZ),
             gain: config.gain,
             host_scale: 1.0,
             device,
@@ -299,9 +307,11 @@ impl B2xxReceiver {
     /// Retune the AD9361 receive synthesizer and FPGA DDC as one logical tune.
     pub async fn tune(&mut self, request: RxTuneRequest) -> Result<RxTuneResult> {
         let request = request.validate()?;
+        let master_clock = self.master_clock_hz.ok_or(Error::ReopenRequired)?;
         let target_rf_frequency_hz = request.center_frequency_hz + request.lo_offset_hz;
         self.control.set_stream(StreamId::LocalControl);
-        let misc = receiver_misc_word(target_rf_frequency_hz);
+        let misc = RadioLayout::new(self.product, self.identity.revision)
+            .misc_word(target_rf_frequency_hz);
         self.control.poke32(SR_CORE_MISC, misc).await?;
         let actual_rf_frequency_hz = self
             .radio
@@ -309,7 +319,7 @@ impl B2xxReceiver {
             .await?;
         let target_dsp_frequency_hz = actual_rf_frequency_hz - request.center_frequency_hz;
         let (actual_dsp_frequency_hz, frequency_word) =
-            ddc_frequency_word(target_dsp_frequency_hz)?;
+            ddc_frequency_word(target_dsp_frequency_hz, master_clock)?;
         self.control.set_stream(StreamId::RadioControl(0));
         self.control
             .poke32(RX_DSP_FREQUENCY, frequency_word)
@@ -329,7 +339,8 @@ impl B2xxReceiver {
         })
     }
 
-    /// Set the FPGA DDC rate. The nearest supported integer decimation is used.
+    /// Set the FPGA DDC rate. Rates up to 16 MS/s retain the 16 MHz clock;
+    /// higher requests select 20 MHz. Stop reception before changing clock modes.
     pub async fn set_sample_rate(&mut self, sample_rate_hz: f64) -> Result<f64> {
         validate_range(
             "sample rate",
@@ -337,10 +348,27 @@ impl B2xxReceiver {
             MIN_SAMPLE_RATE_HZ,
             MAX_SAMPLE_RATE_HZ,
         )?;
-        let (actual_rate, decimation_word, host_scale) = ddc_settings(sample_rate_hz)?;
+        let master_clock = clock_for_rate(sample_rate_hz);
+        let (actual_rate, decimation_word, host_scale) =
+            ddc_settings(sample_rate_hz, master_clock)?;
+        let current_clock = self.master_clock_hz.ok_or(Error::ReopenRequired)?;
+        if master_clock != current_clock {
+            if self.streaming {
+                return Err(Error::Busy);
+            }
+            // A failed or cancelled clock calibration requires reopening the radio.
+            self.master_clock_hz = None;
+            self.radio
+                .set_clock_rate_on(&mut self.control, master_clock)
+                .await?;
+            // Clock calibration restores manual gain; reapply the requested mode.
+            self.set_gain(self.gain).await?;
+            self.master_clock_hz = Some(master_clock);
+        }
         self.control.set_stream(StreamId::RadioControl(0));
         self.control.poke32(RX_DSP_MUX, 0).await?;
-        let (_, frequency_word) = ddc_frequency_word(self.dsp_frequency_hz)?;
+        let (dsp_frequency, frequency_word) =
+            ddc_frequency_word(self.dsp_frequency_hz, master_clock)?;
         self.control
             .poke32(RX_DSP_FREQUENCY, frequency_word)
             .await?;
@@ -349,6 +377,8 @@ impl B2xxReceiver {
             .await?;
         self.control.poke32(RX_DSP_SCALE_IQ, host_scale.1).await?;
         self.host_scale = host_scale.0;
+        self.dsp_frequency_hz = dsp_frequency;
+        self.center_frequency_hz = self.rf_frequency_hz - dsp_frequency;
         self.sample_rate_hz = actual_rate;
         Ok(actual_rate)
     }
@@ -372,9 +402,10 @@ impl B2xxReceiver {
 
     /// Start or restart continuous immediate reception.
     pub async fn start(&mut self) -> Result<()> {
+        self.master_clock_hz.ok_or(Error::ReopenRequired)?;
         self.streaming = true; // Cleanup must stop even a cancelled partial start.
         self.control.set_stream(StreamId::RadioControl(0));
-        self.control.poke32(SR_RX_FMT, 2).await?;
+        self.control.poke32(SR_RX_FMT, 0).await?; // sc16_item32_le
         self.control
             .poke32(RX_FRAMER_MAX_SAMPLES, SAMPLES_PER_PACKET)
             .await?;
@@ -397,6 +428,10 @@ impl B2xxReceiver {
             self.streaming = false;
         }
         Ok(())
+    }
+
+    pub(crate) fn identity(&self) -> &B2xxIdentity {
+        &self.identity
     }
 
     pub(crate) fn host_scale(&self) -> f32 {
@@ -437,39 +472,36 @@ fn validate_range(name: &str, value: f64, minimum: f64, maximum: f64) -> Result<
     Ok(())
 }
 
-fn receiver_misc_word(frequency_hz: f64) -> u32 {
-    let band = if frequency_hz < 2_200_000_000.0 {
-        1 << 3
-    } else if frequency_hz < 4_000_000_000.0 {
-        1 << 4
-    } else {
-        1 << 5
-    };
-    band | (1 << 6)
-}
-
 /// Quantize an RX CORDIC frequency to the signed 32-bit FPGA phase word.
-fn ddc_frequency_word(requested_hz: f64) -> Result<(f64, u32)> {
-    if !requested_hz.is_finite() || requested_hz.abs() >= MASTER_CLOCK_HZ / 2.0 {
+fn ddc_frequency_word(requested_hz: f64, master_clock_hz: f64) -> Result<(f64, u32)> {
+    if !requested_hz.is_finite() || requested_hz.abs() >= master_clock_hz / 2.0 {
         return Err(Error::InvalidArgument(format!(
             "RX DSP frequency must be finite and have magnitude below {}",
-            MASTER_CLOCK_HZ / 2.0
+            master_clock_hz / 2.0
         )));
     }
     const SCALE: f64 = 4_294_967_296.0;
-    let scaled = (requested_hz / MASTER_CLOCK_HZ * SCALE).round();
+    let scaled = (requested_hz / master_clock_hz * SCALE).round();
     if scaled < f64::from(i32::MIN) || scaled > f64::from(i32::MAX) {
         return Err(Error::InvalidArgument(
             "RX DSP frequency cannot be represented by the CORDIC".into(),
         ));
     }
     let signed_word = scaled as i32;
-    let actual_hz = f64::from(signed_word) / SCALE * MASTER_CLOCK_HZ;
+    let actual_hz = f64::from(signed_word) / SCALE * master_clock_hz;
     Ok((actual_hz, signed_word as u32))
 }
 
-fn ddc_settings(requested_rate: f64) -> Result<(f64, u32, (f32, u32))> {
-    let decimation = (MASTER_CLOCK_HZ / requested_rate).round() as u32;
+fn clock_for_rate(requested_rate: f64) -> f64 {
+    if requested_rate > MASTER_CLOCK_HZ {
+        WLAN_CLOCK_HZ
+    } else {
+        MASTER_CLOCK_HZ
+    }
+}
+
+fn ddc_settings(requested_rate: f64, master_clock_hz: f64) -> Result<(f64, u32, (f32, u32))> {
+    let decimation = (master_clock_hz / requested_rate).round() as u32;
     if !(1..=512).contains(&decimation) {
         return Err(Error::InvalidArgument(
             "sample rate cannot be represented by the B2xx DDC".into(),
@@ -498,7 +530,7 @@ fn ddc_settings(requested_rate: f64) -> Result<(f64, u32, (f32, u32))> {
     let scalar = target_scalar.round() as u32;
     let host_scale = (target_scalar / f64::from(scalar) / 32_767.0) as f32;
     Ok((
-        MASTER_CLOCK_HZ / f64::from(decimation),
+        master_clock_hz / f64::from(decimation),
         decimation_word,
         (host_scale, scalar),
     ))
@@ -519,20 +551,21 @@ async fn issue_stream_command(control: &mut RadioControl, command: StreamCommand
     control.poke32(RX_CTRL_TIME_LOW, 0).await
 }
 
-pub(crate) fn decode_fc32(bytes: &[u8], scale: f32) -> Result<Vec<Complex32>> {
-    if !bytes.len().is_multiple_of(8) {
+pub(crate) fn decode_sc16(bytes: &[u8], scale: f32, output: &mut Vec<Complex32>) -> Result<()> {
+    if !bytes.len().is_multiple_of(4) {
         return Err(Error::Chdr(format!(
-            "fc32 receive payload has {} bytes, not a whole number of complex samples",
+            "sc16 receive payload has {} bytes, not a whole number of complex samples",
             bytes.len()
         )));
     }
-    let mut output = Vec::with_capacity(bytes.len() / 8);
-    for sample in bytes.as_chunks::<8>().0 {
-        let re = f32::from_le_bytes(sample[0..4].try_into().expect("four-byte float"));
-        let im = f32::from_le_bytes(sample[4..8].try_into().expect("four-byte float"));
-        output.push(Complex32::new(re * scale, im * scale));
-    }
-    Ok(output)
+    output.clear();
+    // UHD packs I in the high half and Q in the low half of each LE word.
+    output.extend(bytes.as_chunks::<4>().0.iter().map(|sample| {
+        let im = i16::from_le_bytes([sample[0], sample[1]]);
+        let re = i16::from_le_bytes([sample[2], sample[3]]);
+        Complex32::new(f32::from(re) * scale, f32::from(im) * scale)
+    }));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -597,16 +630,22 @@ mod tests {
 
     #[test]
     fn quantizes_signed_cordic_frequencies() {
-        assert_eq!(ddc_frequency_word(1e6).unwrap(), (1e6, 0x1000_0000));
-        assert_eq!(ddc_frequency_word(-1e6).unwrap(), (-1e6, 0xf000_0000));
-        let (actual, word) = ddc_frequency_word(123_456.789).unwrap();
+        assert_eq!(
+            ddc_frequency_word(1e6, MASTER_CLOCK_HZ).unwrap(),
+            (1e6, 0x1000_0000)
+        );
+        assert_eq!(
+            ddc_frequency_word(-1e6, MASTER_CLOCK_HZ).unwrap(),
+            (-1e6, 0xf000_0000)
+        );
+        let (actual, word) = ddc_frequency_word(123_456.789, MASTER_CLOCK_HZ).unwrap();
         assert!((actual - 123_456.789).abs() < 0.002);
         assert_ne!(word, 0);
     }
 
     #[test]
     fn computes_ddc_for_fm_rate() {
-        let (rate, word, (scale, scalar)) = ddc_settings(250_000.0).unwrap();
+        let (rate, word, (scale, scalar)) = ddc_settings(250_000.0, MASTER_CLOCK_HZ).unwrap();
         assert_eq!(rate, 250_000.0);
         assert_eq!(word, (1 << 9) | (1 << 8) | 16);
         assert!(scale.is_finite() && scale > 0.0);
@@ -614,19 +653,88 @@ mod tests {
     }
 
     #[test]
-    fn decodes_normalized_fc32() {
-        let bytes = [2.0_f32.to_le_bytes(), (-4.0_f32).to_le_bytes()].concat();
+    fn wlan_rate_selects_20_mhz_without_changing_existing_rates() {
+        for (requested, clock, expected) in [
+            (250_000.0, 16e6, 250_000.0),
+            (1_100_000.0, 16e6, 16e6 / 15.0),
+            (16e6, 16e6, 16e6),
+            (19e6, 20e6, 20e6),
+            (20e6, 20e6, 20e6),
+        ] {
+            assert_eq!(clock_for_rate(requested), clock);
+            let (actual, word, (scale, scalar)) = ddc_settings(requested, clock).unwrap();
+            assert_eq!(actual, expected);
+            assert!(scale.is_finite() && scale > 0.0 && scalar > 0);
+            if requested == 20e6 {
+                assert_eq!(word, 1, "20 MHz uses no FPGA decimation");
+            }
+        }
+        let config = RxConfig {
+            center_frequency_hz: 2_462_000_000.0,
+            sample_rate_hz: 20e6,
+            gain: RxGain::Manual(70.0),
+        };
+        assert_eq!(config.validate().unwrap(), config);
+        for rate in [f64::NAN, 0.0, 31_249.0, 20_000_001.0, 16e6 / 257.0] {
+            assert!(
+                RxConfig {
+                    sample_rate_hz: rate,
+                    ..config
+                }
+                .validate()
+                .is_err()
+            );
+        }
         assert_eq!(
-            decode_fc32(&bytes, 0.25).unwrap(),
-            vec![Complex32::new(0.5, -1.0)]
+            ddc_frequency_word(1.25e6, 20e6).unwrap(),
+            (1.25e6, 0x1000_0000)
         );
-        assert!(decode_fc32(&bytes[..7], 1.0).is_err());
+        assert_eq!(
+            ddc_frequency_word(-1.25e6, 20e6).unwrap(),
+            (-1.25e6, 0xf000_0000)
+        );
+    }
+
+    #[test]
+    fn decodes_normalized_sc16_in_uhd_word_order() {
+        let bytes = [0xfc, 0xff, 2, 0, 0xff, 0x7f, 0, 0x80];
+        let mut output = Vec::new();
+        decode_sc16(&bytes, 0.25, &mut output).unwrap();
+        assert_eq!(
+            output,
+            [Complex32::new(0.5, -1.0), Complex32::new(-8192.0, 8191.75)]
+        );
+        let capacity = output.capacity();
+        decode_sc16(&bytes[..4], 0.5, &mut output).unwrap();
+        assert_eq!(output, [Complex32::new(1.0, -2.0)]);
+        assert_eq!(output.capacity(), capacity);
+        assert!(decode_sc16(&bytes[..7], 1.0, &mut output).is_err());
+    }
+
+    #[test]
+    fn full_rx_packet_fits_fx3_and_ends_in_a_short_usb_packet() {
+        let samples = vec![0; SAMPLES_PER_PACKET as usize * 4];
+        let packet =
+            crate::chdr::encode_data(RX_DATA_STREAM_ID, 0, &samples, Some(42), false).unwrap();
+        assert_eq!(packet.len(), 16_360);
+        assert!(packet.len() < 16_384);
+        assert_ne!(packet.len() % 512, 0);
+        assert_eq!(
+            crate::chdr::parse(&packet).unwrap().payload.len() / 4,
+            SAMPLES_PER_PACKET as usize
+        );
     }
 
     #[test]
     fn selects_expected_b200_bands() {
-        assert_eq!(receiver_misc_word(100e6), (1 << 6) | (1 << 3));
-        assert_eq!(receiver_misc_word(3e9), (1 << 6) | (1 << 4));
+        assert_eq!(
+            RadioLayout::new(Product::B200, 5).misc_word(100e6),
+            (1 << 6) | (1 << 3)
+        );
+        assert_eq!(
+            RadioLayout::new(Product::B200, 5).misc_word(3e9),
+            (1 << 6) | (1 << 4)
+        );
     }
 
     #[test]

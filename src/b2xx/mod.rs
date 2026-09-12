@@ -4,6 +4,7 @@ pub(crate) mod ad9361;
 mod ad9361_tables;
 mod device;
 mod fx3;
+mod layout;
 pub(crate) mod rx;
 mod session;
 mod spi;
@@ -73,8 +74,8 @@ impl Product {
     #[must_use]
     pub const fn fpga_compatibility(self) -> u16 {
         match self {
-            Self::B205Mini => 7,
-            Self::B200 | Self::B210 | Self::B200Mini => 16,
+            Self::B200Mini | Self::B205Mini => 7,
+            Self::B200 | Self::B210 => 16,
         }
     }
 

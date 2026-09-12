@@ -40,7 +40,8 @@ impl B2xxDeviceInfo {
         }
     }
 
-    /// Open the device and claim interface zero for FX3 control requests.
+    /// Open the device for FX3 control requests.
+    /// Native backends claim interface zero; WebUSB uses the device control endpoint.
     pub fn open(self) -> impl nusb::MaybeFuture<Output = Result<super::B2xxDevice>> {
         crate::operation::operation(super::B2xxDevice::open(self))
     }

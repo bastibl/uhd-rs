@@ -14,6 +14,49 @@ fn descriptor() -> b2xx::B2xxDeviceInfo {
     assert_eq!(devices.len(), 1, "connect one B2xx or set UHD_RS_SERIAL");
     devices.pop().unwrap()
 }
+
+#[test]
+#[ignore = "requires one B2xx on USB 3; measures sustained 20 MS/s RX"]
+fn b2xx_wlan_receive_throughput() {
+    let mut device = Device::builder()
+        .descriptor(descriptor())
+        .sample_rate_hz(20e6)
+        .open()
+        .wait()
+        .unwrap();
+    let mut rx = device.rx_stream().unwrap();
+    let measured = (|| -> uhd_rs::Result<f64> {
+        rx.start().wait()?;
+        let mut samples = [Complex32::default(); 4086];
+        let warmup = std::time::Instant::now();
+        while warmup.elapsed() < Duration::from_secs(1) {
+            rx.read(&mut samples, Some(Duration::from_secs(2))).wait()?;
+        }
+        let before = rx.stats();
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            rx.read(&mut samples, Some(Duration::from_secs(2))).wait()?;
+        }
+        let after = rx.stats();
+        let rate = (after.samples - before.samples) as f64 / start.elapsed().as_secs_f64();
+        println!(
+            "RX: {:.3} MS/s, {} transfers, {} overflows",
+            rate / 1e6,
+            after.transfers - before.transfers,
+            after.overflows - before.overflows
+        );
+        Ok(rate)
+    })();
+    let close = rx.close().wait();
+    let shutdown = device.shutdown().wait();
+    close.unwrap();
+    shutdown.unwrap();
+    assert!(
+        measured.unwrap() >= 19e6,
+        "RX did not sustain the WLAN sample rate"
+    );
+}
+
 #[test]
 #[ignore = "loads volatile firmware/FPGA and accesses physical B2xx hardware"]
 fn b2xx_startup_images_and_diagnostics() {
@@ -51,8 +94,8 @@ fn b2xx_startup_images_and_diagnostics() {
     });
 }
 #[test]
-#[ignore = "requires B200 revision 5+; forces cold firmware startup, receives and restarts RX"]
-fn b200_cold_receive_restart_cancel_and_reopen() {
+#[ignore = "requires B2xx; forces cold firmware startup, receives and restarts RX"]
+fn b2xx_cold_receive_restart_cancel_and_reopen() {
     let mut device = Device::builder()
         .descriptor(descriptor())
         .reload_firmware(true)
@@ -102,12 +145,41 @@ fn b200_cold_receive_restart_cancel_and_reopen() {
     }
 }
 #[test]
-#[ignore = "requires B210; verifies the supported-radio boundary after automatic startup"]
-fn b210_high_level_rejects_unsupported_radio_and_releases_usb() {
-    let result = Device::builder().descriptor(descriptor()).open().wait();
-    assert!(matches!(result,Err(uhd_rs::Error::Unsupported(message)) if message.contains("B200")));
-    let device = descriptor().open().wait().unwrap();
-    futures_lite::future::block_on(device.check_firmware_compatibility()).unwrap();
-    let session = futures_lite::future::block_on(device.open_fpga_session()).unwrap();
-    assert_eq!(session.product(), b2xx::Product::B210);
+#[ignore = "requires B210; verifies channel-zero routing and releases USB"]
+fn b210_radio_initialization_and_release() {
+    futures_lite::future::block_on(async {
+        let device = descriptor().open().await.unwrap();
+        let mut session = device.open_session().await.unwrap();
+        assert_eq!(session.product(), b2xx::Product::B210);
+        assert_eq!(session.radio_chains(), 2);
+        assert!(session.radio_initialized());
+        // B210 channel zero (A) is wired to AD9361 frontend two.
+        assert_eq!(
+            session.ad9361().read_register(0x003).await.unwrap() & 0xc0,
+            0x80
+        );
+        assert_eq!(
+            session.ad9361().read_register(0x002).await.unwrap() & 0xc0,
+            0
+        );
+        assert_eq!(session.ad9361().read_register(0x10c).await.unwrap(), 0);
+        drop(session);
+        let mut device = Device::builder()
+            .descriptor(descriptor())
+            .open()
+            .await
+            .unwrap();
+        assert_eq!(
+            device.identity().await.unwrap().product,
+            Some(b2xx::Product::B210)
+        );
+        device.shutdown().await.unwrap();
+        descriptor()
+            .open()
+            .await
+            .unwrap()
+            .check_firmware_compatibility()
+            .await
+            .unwrap();
+    });
 }

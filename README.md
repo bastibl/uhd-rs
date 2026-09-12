@@ -4,7 +4,16 @@
 
 A pure Rust USRP B2xx driver using [nusb](https://crates.io/crates/nusb), without libusb or C++ UHD. Native and browser applications use the same Rust API.
 
-Radio support is **B200 revision 5+ RX, channel zero, RX2**. B210, B200mini and B205mini support discovery, firmware/FPGA loading and diagnostics; their radio initialization, TX and multichannel streaming are not implemented.
+Radio support is **B200, B210, B200mini and B205mini RX, channel zero, RX2**.
+B200 revisions before 5 and B210 use AD9361 frontend two for logical channel
+zero; newer B200 and mini boards use frontend one. B210 channel zero is the
+A-side receiver. Mini boards use RF port A without external band switches.
+TX and multichannel streaming are not implemented.
+
+The B210 revision 4 is hardware-tested. Other models have routing/register
+sequence tests but still need physical RX validation. `Device::identity()`
+returns motherboard EEPROM information, which is more precise than USB product
+strings shared by B200 and B210.
 
 ## Owned devices and streams
 
@@ -29,9 +38,9 @@ device.shutdown().wait()?;
 
 Opening prepares the radio at 100 MHz, 1 MS/s and manual gain 30 dB; it does not start RX. Discovery (`Device::list`), opening, configuration, stream operations and shutdown are lazy `MaybeFuture` operations: call `.wait()` natively, or `.await` natively/in wasm. Dropping an unpolled ordinary operation does nothing. Native futures are `Send`. The default native blocking API needs no async runtime. Optional `smol` and `tokio` features enable nusb's executor integration; with neither enabled, nusb discovery/open/interface/control operations use native blocking paths even when awaited. The shared radio algorithms do not depend on an executor.
 
-Select a device with `.serial("...")` or `.descriptor(descriptor)`. Configure with builder methods `.frequency_hz(...)`, `.sample_rate_hz(...)`, `.gain(RxGain::Manual(...))`, `.gain(RxGain::Automatic)` and `.lo_offset_hz(...)`. After opening, use `set_center_frequency`, `tune(RxTuneRequest::with_lo_offset(...))`, `set_sample_rate` and `set_gain`. Tune and rate operations return actual quantized values. The FPGA DDC uses a 16 MHz master clock and supported integer decimation.
+Select a device with `.serial("...")` or `.descriptor(descriptor)`. Configure with builder methods `.frequency_hz(...)`, `.sample_rate_hz(...)`, `.gain(RxGain::Manual(...))`, `.gain(RxGain::Automatic)` and `.lo_offset_hz(...)`. After opening, use `set_center_frequency`, `tune(RxTuneRequest::with_lo_offset(...))`, `set_sample_rate` and `set_gain`. Tune and rate operations return actual quantized values. Rates up to 16 MS/s use the existing 16 MHz master clock and supported integer decimation. Requests above 16 MS/s (up to 20 MS/s) select a 20 MHz master clock and deliver 20 MS/s. Stop the RX stream before switching clock modes; a failed or cancelled clock calibration requires reopening the device.
 
-An `RxStream` owns its sample endpoint and persistent queue of 16 × 16,384-byte transfers. Ordinary reads do not acquire the radio control lock. Reads return available samples promptly, keep unread samples for the next call, and return `Error::Timeout` when no samples arrive before the deadline. CHDR loss and device overflow are recovered internally and counted in `StreamingStats`; malformed packets and fatal USB errors invalidate the stream. `None` waits indefinitely. `stop` retains the queue, and restart discards stale packets and resets CHDR synchronization.
+An `RxStream` owns its sample endpoint and persistent queue of 64 × 16,384-byte transfers. The radio sends up to 4,086 complex samples per CHDR packet in UHD's packed `sc16` wire format; reads convert these to normalized `Complex32` samples using reusable storage. At 20 MS/s this needs 80 MB/s of sample payload on USB. Ordinary reads do not acquire the radio control lock. Reads return available samples promptly, keep unread samples for the next call, and return `Error::Timeout` when no samples arrive before the deadline. CHDR loss and device overflow are recovered internally and counted in `StreamingStats`; malformed packets and fatal USB errors invalidate the stream. `None` waits indefinitely. `stop` retains the queue, and restart discards stale packets and resets CHDR synchronization.
 
 Close streams explicitly to observe cleanup errors. `close` consumes the stream and returns an owned lazy operation; dropping or cancelling it still attempts cleanup. `shutdown` returns `Busy` while any stream (including a pending close) owns the claim. Once shutdown starts, configuration and new claims are disabled. Cleanup failures can be retried; successful shutdown is idempotent. A stream remains usable after dropping its `Device`. Final-owner drop attempts bounded synchronous cleanup natively and background cleanup in a browser.
 
@@ -72,7 +81,7 @@ WebUSB requires a secure browser-window context. Set `--cfg=web_sys_unstable_api
 cargo check --target wasm32-unknown-unknown --all-targets
 ```
 
-Permission requests are separate from opening. If a re-enumerated device cannot be identified among authorized devices, opening returns `Error::PermissionRequired`; request a new user gesture and select it again. Devices without a known serial cannot safely be matched across browser reconnection.
+Permission requests are separate from opening. Browser firmware loading uses device-level control transfers without claiming interface zero, so dropping the disconnected bootloader handle does not try to release an interface. Reconnection retains the selected device's serial, including in bootloader mode. If a re-enumerated device cannot be identified among authorized devices, opening returns `Error::PermissionRequired`; request a new user gesture and select it again. Devices without a known serial, or whose serial changes after firmware loading, cannot safely be matched across browser reconnection.
 
 Stopping RX leaves the browser USB device open. After closing or losing a stream that submitted transfers, `rx_stream` returns `ReopenRequired`: call `shutdown`, then open a new `Device`. WebUSB cannot cancel individual transfers. Terminal shutdown awaits the retained browser `UsbDevice.close()`, aborting pending operations and releasing interfaces. Drop cleanup retains ownership until its background attempt finishes.
 
@@ -88,9 +97,9 @@ cargo run -- load-fpga images/assets/usrp_b210_fpga.bin
 cargo run -- peek 0x50
 ```
 
-The capture example writes ten seconds of headerless interleaved little-endian `f32` IQ. Both examples close the stream and shut down the device explicitly, including after a receive error. Pass a serial after diagnostic command arguments when multiple devices are connected. `b2xx::load_firmware_and_reconnect` and `B2xxDevice::open_fpga_session` expose image/reconnection and checked local-control diagnostics without initializing an unsupported radio. Radio-register loopback needs the radio clock initialized.
+The capture example writes ten seconds of headerless interleaved little-endian `f32` IQ. Both examples close the stream and shut down the device explicitly, including after a receive error. Pass a serial after diagnostic command arguments when multiple devices are connected. `b2xx::load_firmware_and_reconnect` and `B2xxDevice::open_fpga_session` expose image/reconnection and checked local-control diagnostics without initializing the radio. Radio-register loopback needs the radio clock initialized.
 
-B2xx normally uses unaligned 8176/16360-byte IN requests. nusb 0.2.7 requires requests aligned to endpoint packet size; the driver retains the existing 16384-byte workaround and accepts short completions. This limitation still needs B200 hardware RX validation.
+B2xx normally uses unaligned 8176/16360-byte IN requests. nusb 0.2.7 requires requests aligned to endpoint packet size; the driver retains the existing 16384-byte workaround and accepts short completions. The aligned-transfer workaround is verified on B210; other models still need hardware RX validation.
 
 ## Migration and verification
 
@@ -102,7 +111,7 @@ Run `cargo test --all-targets` for the native test suite. Browser tests use `was
 cargo test --features hardware-tests --test hardware -- --ignored --test-threads=1 --nocapture
 ```
 
-Run only tests appropriate for the attached model. Set `UHD_RS_SERIAL` when necessary. `UHD_RS_RELOAD_FIRMWARE=1` makes the B2xx diagnostic test exercise a cold firmware reload. The B200 test includes RX restart/cancellation/reopening; optionally set `UHD_RS_HANDOFF_COMMAND` to an executable that opens the released device in another application.
+Run only tests appropriate for the attached model. Set `UHD_RS_SERIAL` when necessary. `UHD_RS_RELOAD_FIRMWARE=1` makes the B2xx diagnostic test exercise a cold firmware reload. The B2xx cold-receive test includes RX restart/cancellation/reopening; optionally set `UHD_RS_HANDOFF_COMMAND` to an executable that opens the released device in another application.
 
 ## Releases
 

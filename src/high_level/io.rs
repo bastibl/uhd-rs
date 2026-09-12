@@ -12,6 +12,13 @@ impl Radio {
             B2xxReceiver::open(device, config).await?,
         )))
     }
+    pub fn identity(&self) -> Result<b2xx::B2xxIdentity> {
+        match self {
+            Self::Hardware(r) => Ok(r.identity().clone()),
+            #[cfg(test)]
+            Self::Fake(_) => Err(Error::Unsupported("simulated radio has no EEPROM")),
+        }
+    }
     pub fn host_scale(&self) -> f32 {
         match self {
             Self::Hardware(r) => r.host_scale(),

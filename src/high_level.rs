@@ -32,7 +32,7 @@ use io::{Endpoint, Radio};
 
 pub type DeviceDescriptor = b2xx::B2xxDeviceInfo;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
-const QUEUE_DEPTH: usize = 16;
+const QUEUE_DEPTH: usize = 64;
 const TRANSFER_BYTES: usize = 16_384;
 
 /// Cumulative statistics for this stream, including restarts.
@@ -85,7 +85,7 @@ impl Drop for Shared {
     }
 }
 
-/// A prepared B200. Dropping it does not invalidate an owned stream.
+/// A prepared B2xx channel-zero receiver. Dropping it does not invalidate an owned stream.
 pub struct Device {
     shared: Owner<Shared>,
 }
@@ -99,6 +99,14 @@ impl Device {
     /// On wasm, poll this from a user gesture before opening.
     pub fn request_permission() -> impl MaybeFuture<Output = Result<Option<DeviceDescriptor>>> {
         operation(b2xx::request_device())
+    }
+    /// Return the motherboard EEPROM identity, independent of USB product labels.
+    pub fn identity(&self) -> impl MaybeFuture<Output = Result<b2xx::B2xxIdentity>> + '_ {
+        operation(async move {
+            let radio = self.shared.radio.lock().await;
+            self.shared.active()?;
+            radio.as_ref().ok_or(Error::Shutdown)?.identity()
+        })
     }
     /// Claim the single sample endpoint. No transfers are submitted until start.
     pub fn rx_stream(&mut self) -> Result<RxStream> {
@@ -145,6 +153,8 @@ impl Device {
                 .actual_center_frequency_hz)
         })
     }
+    /// Set the receive rate, returning the actual quantized rate. Stop the stream
+    /// before crossing between the 16 MHz and 20 MHz clock modes.
     pub fn set_sample_rate(&mut self, hz: f64) -> impl MaybeFuture<Output = Result<f64>> + '_ {
         operation(async move {
             let mut guard = self.shared.radio.lock().await;
@@ -330,8 +340,9 @@ impl ReconnectIdentity {
         Self {
             #[cfg(target_os = "linux")]
             connector: info.physical_port_key(),
-            serial: info
-                .firmware_loaded
+            // Native backends identify the physical port across firmware load.
+            // WebUSB only exposes serials, including the bootloader's serial.
+            serial: (cfg!(target_arch = "wasm32") || info.firmware_loaded)
                 .then(|| info.serial_number.clone())
                 .flatten()
                 .filter(|s| !s.is_empty()),
@@ -498,15 +509,14 @@ impl RxStream {
             buffer.set_requested_len(TRANSFER_BYTES);
             self.endpoint.as_mut().unwrap().submit(buffer);
             match decoded {
-                Ok(Some(samples)) => {
-                    self.buffer.samples = samples;
+                Ok(true) => {
                     let count = self.buffer.copy(output);
                     if count != 0 {
                         self.stats.samples += count as u64;
                         return Ok(count);
                     }
                 }
-                Ok(None) => {}
+                Ok(false) => {}
                 Err(Error::DeviceReceiveOverflow { .. }) => {
                     self.stats.overflows += 1;
                     self.running = false;
@@ -526,8 +536,8 @@ impl RxStream {
             }
         }
     }
-    fn decode(&mut self, bytes: &[u8]) -> Result<Option<Vec<Complex32>>> {
-        use b2xx::rx::{RX_CONTEXT_OVERFLOW, RX_DATA_STREAM_ID, decode_fc32, receive_context_code};
+    fn decode(&mut self, bytes: &[u8]) -> Result<bool> {
+        use b2xx::rx::{RX_CONTEXT_OVERFLOW, RX_DATA_STREAM_ID, decode_sc16, receive_context_code};
         let packet = crate::chdr::parse(bytes)?;
         if packet.stream_id != RX_DATA_STREAM_ID {
             return Err(Error::Chdr(format!(
@@ -549,14 +559,18 @@ impl RxStream {
             });
         }
         match self.sequence.observe(packet.sequence) {
-            SequenceDisposition::Discard => Ok(None),
+            SequenceDisposition::Discard => Ok(false),
             SequenceDisposition::Overflow { expected, actual } => {
                 Err(Error::ReceiveOverflow { expected, actual })
             }
-            SequenceDisposition::Accept => Ok(Some(decode_fc32(
-                packet.payload,
-                f32::from_bits(self.shared.scale.load(Ordering::Relaxed)),
-            )?)),
+            SequenceDisposition::Accept => {
+                decode_sc16(
+                    packet.payload,
+                    f32::from_bits(self.shared.scale.load(Ordering::Relaxed)),
+                    &mut self.buffer.samples,
+                )?;
+                Ok(true)
+            }
         }
     }
     /// Consuming, owned and lazy. Dropping this operation also attempts cleanup.

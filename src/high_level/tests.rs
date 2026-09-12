@@ -18,7 +18,7 @@ fn device() -> (Device, TestIo) {
 fn packet(io: &TestIo, seq: u16, samples: &[f32]) {
     let payload: Vec<u8> = samples
         .iter()
-        .flat_map(|x| [x.to_le_bytes(), (-x).to_le_bytes()].concat())
+        .flat_map(|x| [(-*x as i16).to_le_bytes(), (*x as i16).to_le_bytes()].concat())
         .collect();
     io.0.lock()
         .unwrap()
@@ -46,7 +46,7 @@ fn read_partial_buffers_and_no_control_lock_on_reads() {
     let (mut d, io) = device();
     let mut rx = d.rx_stream().unwrap();
     rx.start().wait().unwrap();
-    assert_eq!(io.0.lock().unwrap().submitted, 16);
+    assert_eq!(io.0.lock().unwrap().submitted, QUEUE_DEPTH);
     packet(&io, 0, &[1., 2., 3.]);
     let control = d.shared.radio.try_lock().unwrap();
     let mut out = [Complex32::default(); 2];
@@ -59,7 +59,7 @@ fn read_partial_buffers_and_no_control_lock_on_reads() {
     assert_eq!(out[1], Complex32::new(2., -2.));
     assert_eq!(rx.read(&mut out, Some(Duration::ZERO)).wait().unwrap(), 1);
     assert_eq!(out[0], Complex32::new(3., -3.));
-    assert_eq!(io.0.lock().unwrap().submitted, 17);
+    assert_eq!(io.0.lock().unwrap().submitted, QUEUE_DEPTH + 1);
     drop(control);
     assert_eq!(rx.close().wait().unwrap().samples, 3);
     d.shutdown().wait().unwrap();
@@ -77,7 +77,7 @@ fn pending_read_timeout_and_cancellation_reuse_queue() {
     let mut read = Box::pin(rx.read(&mut out, None).into_future());
     assert!(block_on(poll_once(read.as_mut())).is_none());
     drop(read);
-    assert_eq!(io.0.lock().unwrap().submitted, 16);
+    assert_eq!(io.0.lock().unwrap().submitted, QUEUE_DEPTH);
     packet(&io, 0, &[7.]);
     assert_eq!(rx.read(&mut out, None).wait().unwrap(), 1);
     rx.close().wait().unwrap();

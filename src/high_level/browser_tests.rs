@@ -39,7 +39,7 @@ async fn stop_retains_pending_queue_and_close_requires_reopen() {
     rx.start().await.unwrap();
     rx.stop().await.unwrap();
     rx.start().await.unwrap();
-    assert_eq!(io.0.lock().unwrap().submitted, 16);
+    assert_eq!(io.0.lock().unwrap().submitted, QUEUE_DEPTH);
     let mut out = [Complex32::default()];
     let mut pending = Box::pin(rx.read(&mut out, None).into_future());
     assert!(poll_once(pending.as_mut()).await.is_none());

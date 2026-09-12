@@ -127,6 +127,7 @@ pub struct B2xxIdentity {
 pub struct B2xxDevice {
     info: B2xxDeviceInfo,
     usb: nusb::Device,
+    #[cfg(not(target_arch = "wasm32"))]
     control: nusb::Interface,
     #[cfg(target_arch = "wasm32")]
     browser: crate::browser_usb::BrowserHandle,
@@ -155,10 +156,15 @@ impl B2xxDevice {
         let usb = nusb::Device::from_js(browser.device.clone()).await?;
         #[cfg(not(target_arch = "wasm32"))]
         let usb = crate::operation::usb(info.nusb_info().open()).await?;
+        // WebUSB sends our device-recipient FX3 requests on endpoint zero
+        // without an interface claim. Avoid creating an interface whose Drop
+        // would release it after the firmware jump disconnects this handle.
+        #[cfg(not(target_arch = "wasm32"))]
         let control = crate::operation::usb(usb.detach_and_claim_interface(0)).await?;
         Ok(Self {
             info,
             usb,
+            #[cfg(not(target_arch = "wasm32"))]
             control,
             #[cfg(target_arch = "wasm32")]
             browser,
@@ -422,7 +428,7 @@ impl B2xxDevice {
         super::B2xxSession::open(self).await
     }
 
-    /// Open an already-running FPGA and cold-start the B200 radio.
+    /// Open an already-running FPGA and cold-start the B2xx radio.
     pub async fn open_session(self) -> Result<super::B2xxSession> {
         let mut session = super::B2xxSession::open(self).await?;
         session.initialize_radio().await?;
@@ -466,7 +472,11 @@ impl B2xxDevice {
     ) -> Result<Vec<u8>> {
         let length = u16::try_from(length)
             .map_err(|_| Error::InvalidArgument("control transfer is too large".into()))?;
-        let bytes = crate::operation::usb(self.control.control_in(
+        #[cfg(target_arch = "wasm32")]
+        let control = &self.usb;
+        #[cfg(not(target_arch = "wasm32"))]
+        let control = &self.control;
+        let bytes = crate::operation::usb(control.control_in(
             ControlIn {
                 control_type: ControlType::Vendor,
                 recipient: Recipient::Device,
@@ -500,7 +510,11 @@ impl B2xxDevice {
                 "control transfer is too large".into(),
             ));
         }
-        crate::operation::usb(self.control.control_out(
+        #[cfg(target_arch = "wasm32")]
+        let control = &self.usb;
+        #[cfg(not(target_arch = "wasm32"))]
+        let control = &self.control;
+        crate::operation::usb(control.control_out(
             ControlOut {
                 control_type: ControlType::Vendor,
                 recipient: Recipient::Device,

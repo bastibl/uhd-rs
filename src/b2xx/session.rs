@@ -150,9 +150,14 @@ impl B2xxSession {
         self.radio.is_some()
     }
 
-    /// Reset, configure, calibrate, and verify the B200's AD9364 radio.
+    /// Reset, configure, calibrate, and verify the B2xx AD9361/AD9364 radio.
     pub async fn initialize_radio(&mut self) -> Result<()> {
-        let radio = Ad9361Controller::initialize_b200(&mut self.control, &self.identity).await?;
+        let radio = Ad9361Controller::initialize_b2xx(
+            &mut self.control,
+            self.product,
+            self.identity.revision,
+        )
+        .await?;
         self.radio = Some(radio);
         Ok(())
     }

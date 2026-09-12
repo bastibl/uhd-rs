@@ -17,7 +17,7 @@ pub enum Error {
         "request WebUSB permission again and select the reconnected device from a user gesture"
     )]
     PermissionRequired,
-    #[error("reopen the browser device before claiming another RX stream")]
+    #[error("reopen the device before continuing RX")]
     ReopenRequired,
     #[error("WebUSB: {0}")]
     Browser(String),
@@ -49,10 +49,10 @@ pub enum Error {
     #[error("receive overflow: expected CHDR sequence {expected}, got {actual}")]
     ReceiveOverflow { expected: u16, actual: u16 },
 
-    #[error("the B200 reported a receive FIFO overflow at CHDR sequence {sequence}")]
+    #[error("the B2xx reported a receive FIFO overflow at CHDR sequence {sequence}")]
     DeviceReceiveOverflow { sequence: u16 },
 
-    #[error("the B200 reported receive context code 0x{code:02x} at CHDR sequence {sequence}")]
+    #[error("the B2xx reported receive context code 0x{code:02x} at CHDR sequence {sequence}")]
     ReceiveContext { code: u8, sequence: u16 },
 
     #[error("timed out after {timeout:?} waiting for an FPGA control response")]

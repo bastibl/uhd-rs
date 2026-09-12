@@ -109,4 +109,4 @@ jobs:
         env:
           WASM_BINDGEN_USE_BROWSER: "1"
           CHROMEDRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
-        run: cargo test --locked --target wasm32-unknown-unknown --lib --all-features
+        run: cargo test --locked --target wasm32-unknown-unknown --lib --test browser_worker --all-features

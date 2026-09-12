@@ -8,10 +8,19 @@ pub(crate) struct BrowserHandle {
 }
 impl BrowserHandle {
     pub async fn find(info: &B2xxDeviceInfo) -> Result<Self> {
-        let usb = web_sys::window()
-            .ok_or(Error::Unsupported("WebUSB requires a browser window"))?
-            .navigator()
-            .usb();
+        let global = js_sys::global();
+        let usb = if let Some(window) = global.dyn_ref::<web_sys::Window>() {
+            window.navigator().usb()
+        } else if let Some(worker) = global.dyn_ref::<web_sys::WorkerGlobalScope>() {
+            worker.navigator().usb()
+        } else {
+            return Err(Error::Unsupported(
+                "WebUSB requires a browser window or worker",
+            ));
+        };
+        if usb.is_undefined() {
+            return Err(Error::Unsupported("WebUSB is not available"));
+        }
         let devices = JsFuture::from(usb.get_devices()).await.map_err(js_error)?;
         let array = js_sys::Array::from(&devices);
         let mut matched = array
@@ -69,17 +78,58 @@ export function install_usb() {
 export function empty_usb() { Object.defineProperty(navigator,'usb',{configurable:true,value:{getDevices:()=>Promise.resolve([])}}); }
 export function pending_transfer(d) { return new Promise(resolve=>d.pending.push(resolve)); }
 export function closed_count(d) { return d.closed; }
+export function install_fx3_usb(bootloader) {
+ const d = install_usb();
+ d.claims = 0;
+ d.releases = 0;
+ d.writes = 0;
+ Object.defineProperties(d, {
+  manufacturerName: {value: bootloader ? 'Cypress' : 'Ettus Research LLC', configurable: true},
+  configurations: {value: []},
+  open: {value: () => { d.opened = true; return Promise.resolve(); }},
+  claimInterface: {value: () => { d.claims++; return Promise.reject(new Error('FX3 must use device control transfers')); }},
+  releaseInterface: {value: () => { d.releases++; return Promise.reject(new DOMException('Unable to release interface.', 'NetworkError')); }},
+  controlTransferIn: {value: (setup, length) => {
+   let bytes;
+   if (setup.requestType === 'standard' && setup.request === 6) {
+    bytes = [18,1,0,3,0,0,0,9,0,0x25,0x20,0,0,0,0,0,0,0];
+   } else if (setup.recipient === 'device' && setup.request === 0x15) {
+    bytes = [8,0];
+   } else { return Promise.reject(new Error('unexpected control read')); }
+   return Promise.resolve({status:'ok', data:new DataView(new Uint8Array(bytes.slice(0,length)).buffer)});
+  }},
+  controlTransferOut: {value: (setup, data) => {
+   if (setup.recipient !== 'device' || setup.request !== 0xa0) {
+    return Promise.reject(new Error('unexpected firmware write'));
+   }
+   d.writes++;
+   if (data.byteLength === 0) {
+    d.opened = false;
+    install_fx3_usb(false);
+   }
+   return Promise.resolve({status:'ok', bytesWritten:data.byteLength});
+  }}
+ });
+ return d;
+}
+export function interface_calls(d) { return d.claims + d.releases; }
+export function firmware_writes(d) { return d.writes; }
+export function change_boot_serial(d) { d.serialNumber = 'bootloader-only'; }
 ")]
     extern "C" {
         fn install_usb() -> web_sys::UsbDevice;
         fn empty_usb();
         fn pending_transfer(d: &web_sys::UsbDevice) -> js_sys::Promise;
         fn closed_count(d: &web_sys::UsbDevice) -> u32;
+        fn install_fx3_usb(bootloader: bool) -> web_sys::UsbDevice;
+        fn interface_calls(d: &web_sys::UsbDevice) -> u32;
+        fn firmware_writes(d: &web_sys::UsbDevice) -> u32;
+        fn change_boot_serial(d: &web_sys::UsbDevice);
     }
     #[wasm_bindgen_test]
     async fn terminal_browser_close_aborts_pending_operations_and_is_idempotent() {
         let raw = install_usb();
-        let info = crate::Device::request_permission().await.unwrap().unwrap();
+        let info = crate::Device::list().await.unwrap().pop().unwrap();
         let handle = BrowserHandle::find(&info).await.unwrap();
         let pending = pending_transfer(&raw);
         handle.close().await.unwrap();
@@ -94,7 +144,7 @@ export function closed_count(d) { return d.closed; }
     #[wasm_bindgen_test]
     async fn permission_loss_returns_typed_reselection_error() {
         install_usb();
-        let info = crate::Device::request_permission().await.unwrap().unwrap();
+        let info = crate::Device::list().await.unwrap().pop().unwrap();
         empty_usb();
         assert!(matches!(
             BrowserHandle::find(&info).await,
@@ -108,5 +158,57 @@ export function closed_count(d) { return d.closed; }
         drop(BrowserHandle::find(&info).await.unwrap());
         futures_timer::Delay::new(std::time::Duration::from_millis(20)).await;
         assert_eq!(closed_count(&raw), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn firmware_reconnect_uses_device_control_without_interface_cleanup() {
+        let bootloader = install_fx3_usb(true);
+        let info = crate::Device::list().await.unwrap().pop().unwrap();
+        assert!(!info.firmware_loaded);
+        let mut images = crate::images::ImageCatalog::default();
+        images.insert(
+            crate::images::Image::Firmware,
+            b":020000040001F9\n:0400100001020304E2\n:0400000500010010E6\n:00000001FF\n".to_vec(),
+        );
+        let device = crate::b2xx::load_firmware_and_reconnect(
+            info,
+            &images,
+            false,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(device.info().firmware_loaded);
+        assert_eq!(device.info().serial_number.as_deref(), Some("test-radio"));
+        assert_eq!(device.firmware_compatibility().await.unwrap().major, 8);
+        drop(device);
+        futures_timer::Delay::new(std::time::Duration::from_millis(20)).await;
+        assert_eq!(firmware_writes(&bootloader), 2);
+        assert_eq!(interface_calls(&bootloader), 0);
+        assert_eq!(closed_count(&bootloader), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn changed_serial_requires_reselection_after_firmware_load() {
+        let bootloader = install_fx3_usb(true);
+        change_boot_serial(&bootloader);
+        let info = crate::Device::list().await.unwrap().pop().unwrap();
+        let mut images = crate::images::ImageCatalog::default();
+        images.insert(
+            crate::images::Image::Firmware,
+            b":020000040001F9\n:0400100001020304E2\n:0400000500010010E6\n:00000001FF\n".to_vec(),
+        );
+        assert!(matches!(
+            crate::b2xx::load_firmware_and_reconnect(
+                info,
+                &images,
+                false,
+                std::time::Duration::from_millis(50),
+            )
+            .await,
+            Err(Error::PermissionRequired)
+        ));
+        assert_eq!(firmware_writes(&bootloader), 2);
+        assert_eq!(interface_calls(&bootloader), 0);
     }
 }

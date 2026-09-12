@@ -1,4 +1,4 @@
-//! B200 AD9364 cold-start initialization and runtime control.
+//! B2xx AD9361/AD9364 cold-start initialization and runtime control.
 //!
 //! The register algorithms and fixed tables are derived from UHD 4.8's
 //! GPL-3.0-or-later AD9361 driver. They are expressed as async Rust so the
@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use futures_timer::Delay;
 
-use super::{Ad9361Io, B2xxIdentity, B2xxSpi, Product, RadioControl, StreamId};
+use super::layout::RadioLayout;
+use super::{Ad9361Io, B2xxSpi, Product, RadioControl, StreamId};
 use crate::{Error, Result};
 
 use super::ad9361_tables::{
@@ -26,7 +27,6 @@ const CALIBRATION_WINDOW_HZ: f64 = 100_000_000.0;
 
 const SR_CORE_MISC: u32 = 16 * 4;
 const CODEC_RESET: u32 = 1 << 2;
-const DEFAULT_CORE_MISC: u32 = (1 << 6) | (1 << 3);
 const SR_CODEC_IDLE: u32 = 22 * 4;
 const RB64_CODEC_READBACK: u32 = 24;
 const FPGA_SIGNATURE: u32 = 0xace0_ba5e;
@@ -86,6 +86,8 @@ impl Default for ChipRegisters {
 /// Host-side state needed to keep later tuning and gain changes coherent with
 /// the cold-start register sequence.
 pub(crate) struct Ad9361Controller {
+    layout: RadioLayout,
+    rx_agc: bool,
     registers: ChipRegisters,
     rx_frequency_hz: f64,
     tx_frequency_hz: f64,
@@ -115,6 +117,8 @@ pub(crate) struct Ad9361Controller {
 impl Default for Ad9361Controller {
     fn default() -> Self {
         Self {
+            layout: RadioLayout::new(Product::B200, 5),
+            rx_agc: false,
             registers: ChipRegisters::default(),
             rx_frequency_hz: DEFAULT_RX_FREQUENCY_HZ,
             tx_frequency_hz: DEFAULT_TX_FREQUENCY_HZ,
@@ -144,21 +148,12 @@ impl Default for Ad9361Controller {
 }
 
 impl Ad9361Controller {
-    pub(crate) async fn initialize_b200(
+    pub(crate) async fn initialize_b2xx(
         control: &mut RadioControl,
-        identity: &B2xxIdentity,
+        product: Product,
+        revision: u16,
     ) -> Result<Self> {
-        if identity.product != Some(Product::B200) {
-            return Err(Error::Unsupported(
-                "AD9364 initialization currently supports only B200 hardware",
-            ));
-        }
-        if identity.revision < 5 {
-            return Err(Error::Unsupported(
-                "AD9364 initialization requires a revision 5 or newer B200",
-            ));
-        }
-
+        let layout = RadioLayout::new(product, revision);
         control.set_stream(StreamId::LocalControl);
         let raw_compatibility = control.peek64(0).await?;
         let signature = (raw_compatibility >> 32) as u32;
@@ -169,22 +164,30 @@ impl Ad9361Controller {
             });
         }
         let fpga_major = ((raw_compatibility >> 16) & 0xffff) as u16;
-        if fpga_major != Product::B200.fpga_compatibility() {
+        if fpga_major != product.fpga_compatibility() {
             return Err(Error::FpgaCompatibility {
-                expected: Product::B200.fpga_compatibility(),
+                expected: product.fpga_compatibility(),
                 actual: fpga_major,
             });
         }
         let radio_chains = ((control.peek32(CORE_STATUS_ADDRESS).await? >> 8) & 0xff) as u8;
-        if radio_chains != 1 {
+        if radio_chains != layout.radio_chains() {
             return Err(Error::RadioChainCount(radio_chains));
         }
         control
-            .poke32(SR_CORE_MISC, DEFAULT_CORE_MISC | CODEC_RESET)
+            .poke32(
+                SR_CORE_MISC,
+                layout.misc_word(DEFAULT_TUNE_FREQUENCY_HZ) | CODEC_RESET,
+            )
             .await?;
-        control.poke32(SR_CORE_MISC, DEFAULT_CORE_MISC).await?;
+        control
+            .poke32(SR_CORE_MISC, layout.misc_word(DEFAULT_TUNE_FREQUENCY_HZ))
+            .await?;
 
-        let mut controller = Self::default();
+        let mut controller = Self {
+            layout,
+            ..Self::default()
+        };
         {
             let mut io = Ad9361Io::new(B2xxSpi::new(control));
             controller.initialize(&mut io).await?;
@@ -198,10 +201,26 @@ impl Ad9361Controller {
         {
             let mut io = Ad9361Io::new(B2xxSpi::new(control));
             controller
-                .set_active_chains(&mut io, false, false, true, false)
+                .set_active_chains(
+                    &mut io,
+                    false,
+                    false,
+                    !layout.rx_chain_two,
+                    layout.rx_chain_two,
+                )
                 .await?;
         }
         Ok(controller)
+    }
+
+    pub(crate) async fn set_clock_rate_on(
+        &mut self,
+        control: &mut RadioControl,
+        rate: f64,
+    ) -> Result<f64> {
+        control.set_stream(StreamId::LocalControl);
+        let mut io = Ad9361Io::new(B2xxSpi::new(control));
+        self.set_clock_rate(&mut io, rate).await
     }
 
     pub(crate) async fn tune_rx(
@@ -227,9 +246,16 @@ impl Ad9361Controller {
     pub(crate) async fn set_slow_agc_on(&mut self, control: &mut RadioControl) -> Result<()> {
         control.set_stream(StreamId::LocalControl);
         let mut io = Ad9361Io::new(B2xxSpi::new(control));
-        let mode = (io.read(0x0fa).await? & !0x03) | 0x02;
+        self.set_rx_agc(&mut io).await
+    }
+
+    async fn set_rx_agc(&mut self, io: &mut impl RegisterIo) -> Result<()> {
+        let shift = self.layout.agc_shift();
+        let mode = (io.read(0x0fa).await? & !(0x03 << shift)) | (0x02 << shift);
         io.write(0x0fa, mode).await?;
-        self.setup_gain_control(&mut io, true).await
+        self.setup_gain_control(io, true).await?;
+        self.rx_agc = true;
+        Ok(())
     }
 
     async fn initialize(&mut self, io: &mut impl RegisterIo) -> Result<()> {
@@ -251,7 +277,7 @@ impl Ad9361Controller {
             (0x2a8, 0x0e),
             (0x2ab, 0x07),
             (0x2ac, 0xff),
-            // B200 uses the XTAL_N input and a 40 MHz reference.
+            // B2xx uses the XTAL_N input and a 40 MHz reference.
             (0x009, 0x17),
         ] {
             io.write(register, value).await?;
@@ -260,7 +286,7 @@ impl Ad9361Controller {
 
         self.setup_rates(io, INITIAL_CLOCK_HZ).await?;
 
-        // FDD dual-port DDR CMOS, I/Q swap, 1R1T timing, and B200 delays.
+        // FDD dual-port DDR CMOS, I/Q swap, 1R1T timing, and B2xx delays.
         for &(register, value) in &[
             (0x010, 0xc8),
             (0x011, 0x00),
@@ -594,19 +620,13 @@ impl Ad9361Controller {
         match direction {
             Direction::Rx => {
                 self.requested_rx_frequency_hz = frequency_hz;
-                let port = if frequency_hz < 2.2e9 {
-                    0x30
-                } else if frequency_hz < 4e9 {
-                    0x0c
-                } else {
-                    0x03
-                };
+                let port = self.layout.rx_port(frequency_hz);
                 self.registers.input_selection = (self.registers.input_selection & 0xc0) | port;
                 self.registers.vco_dividers = (self.registers.vco_dividers & 0xf0) | divider_index;
             }
             Direction::Tx => {
                 self.requested_tx_frequency_hz = frequency_hz;
-                if frequency_hz < 2.5e9 {
+                if self.layout.tx_port_b(frequency_hz) {
                     self.registers.input_selection |= 0x40;
                 } else {
                     self.registers.input_selection &= !0x40;
@@ -791,7 +811,10 @@ impl Ad9361Controller {
     async fn set_manual_rx_gain(&mut self, io: &mut impl RegisterIo, gain_db: f64) -> Result<()> {
         self.setup_gain_control(io, false).await?;
         self.rx_gain_db = gain_db.clamp(0.0, 76.0);
-        io.write(0x109, self.rx_gain_db as u8).await
+        io.write(self.layout.gain_register(), self.rx_gain_db as u8)
+            .await?;
+        self.rx_agc = false;
+        Ok(())
     }
 
     async fn set_tx_gain(&mut self, io: &mut impl RegisterIo, gain_db: f64) -> Result<()> {
@@ -805,7 +828,9 @@ impl Ad9361Controller {
     async fn reprogram_gains(&mut self, io: &mut impl RegisterIo) -> Result<()> {
         let rx_gain = self.rx_gain_db;
         let tx_gain = self.tx_gain_db;
-        self.set_manual_rx_gain(io, rx_gain).await?;
+        if !self.rx_agc {
+            self.set_manual_rx_gain(io, rx_gain).await?;
+        }
         self.set_tx_gain(io, tx_gain).await
     }
 
@@ -1621,7 +1646,7 @@ mod tests {
                 0x016 => {
                     self.registers.insert(register, 0);
                 }
-                // Model the ENSM transitions used by the B200 sequence.
+                // Model the ENSM transitions used by the B2xx sequence.
                 0x014 => {
                     let state = match value {
                         0x00 => 0x00,
@@ -1686,6 +1711,74 @@ mod tests {
             assert!(io.writes.starts_with(&[(0x000, 0x01), (0x000, 0x00)]));
             assert!(io.writes.contains(&(0x006, 0x0f)));
             assert!(io.writes.contains(&(0x007, 0x0f)));
+        });
+    }
+
+    #[test]
+    fn model_specific_rx_chain_gain_agc_and_ports() {
+        futures_lite::future::block_on(async {
+            for (product, revision, rx_mask, gain_reg, agc_mask, port) in [
+                (Product::B200, 4, 0x80, 0x10c, 0x08, 0x30),
+                (Product::B200, 5, 0x40, 0x109, 0x02, 0x30),
+                (Product::B210, 4, 0x80, 0x10c, 0x08, 0x30),
+                (Product::B200Mini, 1, 0x40, 0x109, 0x02, 0x03),
+                (Product::B205Mini, 1, 0x40, 0x109, 0x02, 0x03),
+            ] {
+                let layout = RadioLayout::new(product, revision);
+                let mut controller = Ad9361Controller {
+                    layout,
+                    ..Default::default()
+                };
+                let mut io = SimulatedAd9364::ready();
+                controller.initialize(&mut io).await.unwrap();
+                controller
+                    .set_clock_rate(&mut io, MASTER_CLOCK_HZ)
+                    .await
+                    .unwrap();
+                controller
+                    .tune(&mut io, Direction::Rx, 100e6)
+                    .await
+                    .unwrap();
+                controller
+                    .set_active_chains(
+                        &mut io,
+                        false,
+                        false,
+                        !layout.rx_chain_two,
+                        layout.rx_chain_two,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(io.registers[&0x003] & 0xc0, rx_mask, "{product:?}");
+                assert_eq!(io.registers[&0x002] & 0xc0, 0, "TX disabled");
+                assert_eq!(io.registers[&0x004] & 0x3f, port);
+                controller.set_manual_rx_gain(&mut io, 42.0).await.unwrap();
+                assert_eq!(io.registers[&gain_reg], 42);
+                controller.set_rx_agc(&mut io).await.unwrap();
+                assert_eq!(io.registers[&0x0fa] & 0x0f, agc_mask);
+                // A frequency change must not silently disable AGC, including
+                // when moving to another RF port and gain table.
+                controller.tune(&mut io, Direction::Rx, 3e9).await.unwrap();
+                assert_eq!(io.registers[&0x0fa] & 0x0f, agc_mask);
+                assert_eq!(io.registers[&0x004] & 0x3f, layout.rx_port(3e9));
+                controller.set_manual_rx_gain(&mut io, 20.0).await.unwrap();
+                assert_eq!(io.registers[&0x0fa] & 0x0f, 0);
+                assert_eq!(io.registers[&gain_reg], 20);
+                // Recalibrate for WLAN, then return to the original clock.
+                // Both modes must preserve board routing and keep TX disabled.
+                for rate in [20e6, 16e6] {
+                    assert_eq!(
+                        controller.set_clock_rate(&mut io, rate).await.unwrap(),
+                        rate
+                    );
+                    assert_eq!(controller.baseband_bandwidth_hz, rate);
+                    assert_eq!(io.registers[&0x017], 0x0a, "FDD restored");
+                    assert_eq!(io.registers[&0x003] & 0xc0, rx_mask);
+                    assert_eq!(io.registers[&0x002] & 0xc0, 0, "TX disabled");
+                    assert_eq!(io.registers[&gain_reg], 20);
+                    assert_eq!(io.registers[&0x004] & 0x3f, layout.rx_port(3e9));
+                }
+            }
         });
     }
 
