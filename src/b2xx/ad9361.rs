@@ -18,6 +18,8 @@ use super::ad9361_tables::{
 };
 
 pub(crate) const MASTER_CLOCK_HZ: f64 = 16_000_000.0;
+pub(crate) const MIN_MASTER_CLOCK_HZ: f64 = 220_000.0;
+pub(crate) const MAX_MASTER_CLOCK_HZ: f64 = 61_440_000.0;
 const INITIAL_CLOCK_HZ: f64 = 50_000_000.0;
 const DEFAULT_RX_FREQUENCY_HZ: f64 = 800_000_000.0;
 const DEFAULT_TX_FREQUENCY_HZ: f64 = 850_000_000.0;
@@ -1764,14 +1766,31 @@ mod tests {
                 controller.set_manual_rx_gain(&mut io, 20.0).await.unwrap();
                 assert_eq!(io.registers[&0x0fa] & 0x0f, 0);
                 assert_eq!(io.registers[&gain_reg], 20);
-                // Recalibrate for WLAN, then return to the original clock.
-                // Both modes must preserve board routing and keep TX disabled.
-                for rate in [20e6, 16e6] {
-                    assert_eq!(
-                        controller.set_clock_rate(&mut io, rate).await.unwrap(),
-                        rate
+                // Exercise every clock/filter branch and both clock limits,
+                // preserving board routing and keeping TX disabled.
+                for rate in [
+                    MIN_MASTER_CLOCK_HZ,
+                    329_999.0,
+                    330e3,
+                    659_999.0,
+                    660e3,
+                    20e6,
+                    20_000_001.0,
+                    22_999_999.0,
+                    23e6,
+                    40_999_999.0,
+                    41e6,
+                    58e6,
+                    58_000_001.0,
+                    MAX_MASTER_CLOCK_HZ,
+                    16e6,
+                ] {
+                    let actual = controller.set_clock_rate(&mut io, rate).await.unwrap();
+                    assert!(
+                        (actual - rate).abs() < 1.0,
+                        "{product:?}: {rate} -> {actual}"
                     );
-                    assert_eq!(controller.baseband_bandwidth_hz, rate);
+                    assert_eq!(controller.baseband_bandwidth_hz, actual);
                     assert_eq!(io.registers[&0x017], 0x0a, "FDD restored");
                     assert_eq!(io.registers[&0x003] & 0xc0, rx_mask);
                     assert_eq!(io.registers[&0x002] & 0xc0, 0, "TX disabled");

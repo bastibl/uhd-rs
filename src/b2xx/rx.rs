@@ -4,16 +4,16 @@
 //! packed `sc16` samples on the USB wire, the FPGA DDC, and cold-starts the
 //! AD9364 before applying the requested stream configuration.
 
-use super::ad9361::MASTER_CLOCK_HZ;
+use super::ad9361::{MASTER_CLOCK_HZ, MAX_MASTER_CLOCK_HZ, MIN_MASTER_CLOCK_HZ};
 use super::layout::RadioLayout;
 use super::{B2xxDevice, B2xxIdentity, Product, RadioControl, StreamId, ad9361::Ad9361Controller};
 use crate::{Error, Result};
 
-const WLAN_CLOCK_HZ: f64 = 20_000_000.0;
 const MIN_RF_HZ: f64 = 70_000_000.0;
 const MAX_RF_HZ: f64 = 6_000_000_000.0;
-const MIN_SAMPLE_RATE_HZ: f64 = MASTER_CLOCK_HZ / 512.0;
-const MAX_SAMPLE_RATE_HZ: f64 = WLAN_CLOCK_HZ;
+const MAX_DECIMATION: u32 = 512;
+const MIN_SAMPLE_RATE_HZ: f64 = MIN_MASTER_CLOCK_HZ / MAX_DECIMATION as f64;
+const MAX_SAMPLE_RATE_HZ: f64 = MAX_MASTER_CLOCK_HZ;
 const MIN_GAIN_DB: f64 = 0.0;
 const MAX_GAIN_DB: f64 = 76.0;
 // 16-byte timestamped CHDR header + sc16 payload = 16,360 bytes.
@@ -71,7 +71,8 @@ pub enum RxGain {
 pub struct RxConfig {
     /// RF center frequency in Hz.
     pub center_frequency_hz: f64,
-    /// Complex samples per second requested from the FPGA DDC.
+    /// Complex samples per second requested from the FPGA DDC, from 429.6875
+    /// through 61,440,000. The master clock is selected automatically.
     pub sample_rate_hz: f64,
     /// Receive gain mode.
     pub gain: RxGain,
@@ -308,6 +309,7 @@ impl B2xxReceiver {
     pub async fn tune(&mut self, request: RxTuneRequest) -> Result<RxTuneResult> {
         let request = request.validate()?;
         let master_clock = self.master_clock_hz.ok_or(Error::ReopenRequired)?;
+        ddc_frequency_word(request.lo_offset_hz, master_clock)?;
         let target_rf_frequency_hz = request.center_frequency_hz + request.lo_offset_hz;
         self.control.set_stream(StreamId::LocalControl);
         let misc = RadioLayout::new(self.product, self.identity.revision)
@@ -339,8 +341,8 @@ impl B2xxReceiver {
         })
     }
 
-    /// Set the FPGA DDC rate. Rates up to 16 MS/s retain the 16 MHz clock;
-    /// higher requests select 20 MHz. Stop reception before changing clock modes.
+    /// Set the receive rate, selecting a master clock and FPGA decimation.
+    /// Stop reception before changing the master clock.
     pub async fn set_sample_rate(&mut self, sample_rate_hz: f64) -> Result<f64> {
         validate_range(
             "sample rate",
@@ -348,23 +350,29 @@ impl B2xxReceiver {
             MIN_SAMPLE_RATE_HZ,
             MAX_SAMPLE_RATE_HZ,
         )?;
-        let master_clock = clock_for_rate(sample_rate_hz);
-        let (actual_rate, decimation_word, host_scale) =
-            ddc_settings(sample_rate_hz, master_clock)?;
+        let mut master_clock = clock_for_rate(sample_rate_hz);
+        // Reject an incompatible existing LO offset before recalibrating hardware.
+        ddc_frequency_word(self.dsp_frequency_hz, master_clock)?;
         let current_clock = self.master_clock_hz.ok_or(Error::ReopenRequired)?;
-        if master_clock != current_clock {
+        // The BBPLL quantizes the clock to within one Hz of the target.
+        let clock_changed = (master_clock - current_clock).abs() >= 1.0;
+        if clock_changed {
             if self.streaming {
                 return Err(Error::Busy);
             }
             // A failed or cancelled clock calibration requires reopening the radio.
             self.master_clock_hz = None;
-            self.radio
+            master_clock = self
+                .radio
                 .set_clock_rate_on(&mut self.control, master_clock)
                 .await?;
             // Clock calibration restores manual gain; reapply the requested mode.
             self.set_gain(self.gain).await?;
-            self.master_clock_hz = Some(master_clock);
+        } else {
+            master_clock = current_clock;
         }
+        let (actual_rate, decimation_word, host_scale) =
+            ddc_settings(sample_rate_hz, master_clock)?;
         self.control.set_stream(StreamId::RadioControl(0));
         self.control.poke32(RX_DSP_MUX, 0).await?;
         let (dsp_frequency, frequency_word) =
@@ -380,6 +388,7 @@ impl B2xxReceiver {
         self.dsp_frequency_hz = dsp_frequency;
         self.center_frequency_hz = self.rf_frequency_hz - dsp_frequency;
         self.sample_rate_hz = actual_rate;
+        self.master_clock_hz = Some(master_clock);
         Ok(actual_rate)
     }
 
@@ -493,20 +502,32 @@ fn ddc_frequency_word(requested_hz: f64, master_clock_hz: f64) -> Result<(f64, u
 }
 
 fn clock_for_rate(requested_rate: f64) -> f64 {
-    if requested_rate > MASTER_CLOCK_HZ {
-        WLAN_CLOCK_HZ
-    } else {
-        MASTER_CLOCK_HZ
+    // UHD's ad936x_manager chooses the largest power-of-two multiple that
+    // fits the clock range, skipping a lone halfband (decimation two).
+    // Limit the multiplier to the B2xx DDC range so low rates remain attainable.
+    let mut multiplier = 1;
+    while multiplier < MAX_DECIMATION
+        && requested_rate * f64::from(multiplier * 2) <= MAX_MASTER_CLOCK_HZ
+    {
+        multiplier *= 2;
     }
+    if multiplier == 2 && requested_rate >= MIN_MASTER_CLOCK_HZ {
+        multiplier = 1;
+    }
+    requested_rate * f64::from(multiplier)
 }
 
 fn ddc_settings(requested_rate: f64, master_clock_hz: f64) -> Result<(f64, u32, (f32, u32))> {
-    let decimation = (master_clock_hz / requested_rate).round() as u32;
-    if !(1..=512).contains(&decimation) {
-        return Err(Error::InvalidArgument(
-            "sample rate cannot be represented by the B2xx DDC".into(),
-        ));
-    }
+    // Match rx_dsp_core_3000's B200 rate grid. Compare in samples/second,
+    // rather than rounding the divisor, and coerce gaps to the nearest rate.
+    let decimation = (1..=MAX_DECIMATION)
+        .rev()
+        .filter(|d| *d <= 128 || (*d <= 256 && d.is_multiple_of(2)) || d.is_multiple_of(4))
+        .min_by(|a, b| {
+            let error = |d| (master_clock_hz / f64::from(d) - requested_rate).abs();
+            error(*a).total_cmp(&error(*b))
+        })
+        .expect("B2xx has supported decimations");
     let mut cic_decimation = decimation;
     let mut halfband_small = 0;
     let mut halfband_large = 0;
@@ -653,21 +674,29 @@ mod tests {
     }
 
     #[test]
-    fn wlan_rate_selects_20_mhz_without_changing_existing_rates() {
-        for (requested, clock, expected) in [
-            (250_000.0, 16e6, 250_000.0),
-            (1_100_000.0, 16e6, 16e6 / 15.0),
-            (16e6, 16e6, 16e6),
-            (19e6, 20e6, 20e6),
-            (20e6, 20e6, 20e6),
+    fn selects_clocks_across_the_full_sample_rate_range() {
+        for (requested, clock, decimation) in [
+            (MIN_SAMPLE_RATE_HZ, 220e3, 512),
+            (1_000.0, 512e3, 512),
+            (10_000.0, 5.12e6, 512),
+            (31_250.0, 16e6, 512),
+            (250_000.0, 32e6, 128),
+            (1_100_000.0, 35.2e6, 32),
+            (7e6, 56e6, 8),
+            (15.36e6, 61.44e6, 4),
+            (16e6, 16e6, 1),
+            (19e6, 19e6, 1),
+            (20e6, 20e6, 1),
+            (30.72e6, 30.72e6, 1),
+            (40e6, 40e6, 1),
+            (MAX_SAMPLE_RATE_HZ, 61.44e6, 1),
         ] {
             assert_eq!(clock_for_rate(requested), clock);
             let (actual, word, (scale, scalar)) = ddc_settings(requested, clock).unwrap();
-            assert_eq!(actual, expected);
+            assert_eq!(actual, requested);
             assert!(scale.is_finite() && scale > 0.0 && scalar > 0);
-            if requested == 20e6 {
-                assert_eq!(word, 1, "20 MHz uses no FPGA decimation");
-            }
+            let halfbands = ((word >> 9) & 1) + ((word >> 8) & 1);
+            assert_eq!((word & 0xff) << halfbands, decimation);
         }
         let config = RxConfig {
             center_frequency_hz: 2_462_000_000.0,
@@ -675,7 +704,15 @@ mod tests {
             gain: RxGain::Manual(70.0),
         };
         assert_eq!(config.validate().unwrap(), config);
-        for rate in [f64::NAN, 0.0, 31_249.0, 20_000_001.0, 16e6 / 257.0] {
+        for rate in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            MIN_SAMPLE_RATE_HZ - 0.001,
+            MAX_SAMPLE_RATE_HZ + 0.001,
+        ] {
             assert!(
                 RxConfig {
                     sample_rate_hz: rate,
@@ -693,6 +730,47 @@ mod tests {
             ddc_frequency_word(-1.25e6, 20e6).unwrap(),
             (-1.25e6, 0xf000_0000)
         );
+    }
+
+    #[test]
+    fn accepts_intermediate_rates_and_selects_representable_clocks() {
+        let config = RxConfig {
+            center_frequency_hz: 100e6,
+            sample_rate_hz: MIN_SAMPLE_RATE_HZ,
+            gain: RxGain::Automatic,
+        };
+        for i in 0..=2_000 {
+            let rate = MIN_SAMPLE_RATE_HZ
+                * (MAX_SAMPLE_RATE_HZ / MIN_SAMPLE_RATE_HZ).powf(f64::from(i) / 2_000.0);
+            let rate = rate.clamp(MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ);
+            RxConfig {
+                sample_rate_hz: rate,
+                ..config
+            }
+            .validate()
+            .unwrap();
+            let clock = clock_for_rate(rate);
+            assert!((MIN_MASTER_CLOCK_HZ..=MAX_MASTER_CLOCK_HZ).contains(&clock));
+            let (actual, _, _) = ddc_settings(rate, clock).unwrap();
+            assert!((actual - rate).abs() < rate * 1e-12);
+        }
+    }
+
+    #[test]
+    fn coerces_ddc_gaps_to_the_nearest_supported_sample_rate() {
+        for (requested_divisor, expected_divisor) in [
+            (10.49, 11), // Compare rate errors, not divisor errors.
+            (129.0, 130),
+            (257.0, 256),
+            (259.0, 260),
+            (511.0, 512),
+        ] {
+            let (actual, word, _) =
+                ddc_settings(MASTER_CLOCK_HZ / requested_divisor, MASTER_CLOCK_HZ).unwrap();
+            assert_eq!(actual, MASTER_CLOCK_HZ / f64::from(expected_divisor));
+            let halfbands = ((word >> 9) & 1) + ((word >> 8) & 1);
+            assert_eq!((word & 0xff) << halfbands, expected_divisor);
+        }
     }
 
     #[test]

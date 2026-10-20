@@ -153,8 +153,9 @@ impl Device {
                 .actual_center_frequency_hz)
         })
     }
-    /// Set the receive rate, returning the actual quantized rate. Stop the stream
-    /// before crossing between the 16 MHz and 20 MHz clock modes.
+    /// Set the receive rate from 429.6875 S/s through 61.44 MS/s, returning the
+    /// actual quantized rate. Stop the stream before changing the master clock,
+    /// which is selected automatically for the requested rate.
     pub fn set_sample_rate(&mut self, hz: f64) -> impl MaybeFuture<Output = Result<f64>> + '_ {
         operation(async move {
             let mut guard = self.shared.radio.lock().await;
