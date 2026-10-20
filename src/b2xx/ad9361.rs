@@ -43,10 +43,19 @@ enum Direction {
 trait RegisterIo {
     async fn read(&mut self, register: u16) -> Result<u8>;
     async fn write(&mut self, register: u16, value: u8) -> Result<()>;
+    async fn write_many(&mut self, registers: &[(u16, u8)]) -> Result<()> {
+        for &(register, value) in registers {
+            self.write(register, value).await?;
+        }
+        Ok(())
+    }
     async fn delay(&mut self, duration: Duration);
 }
 
 impl RegisterIo for Ad9361Io<'_> {
+    async fn write_many(&mut self, registers: &[(u16, u8)]) -> Result<()> {
+        self.write_registers(registers).await
+    }
     async fn read(&mut self, register: u16) -> Result<u8> {
         self.read_register(register).await
     }
@@ -536,16 +545,29 @@ impl Ad9361Controller {
         let chain_bits = 0x03 << 3;
         io.write(base + 5, tap_bits | chain_bits | 0x02).await?;
         io.delay(Duration::from_millis(1)).await;
+        let mut writes = Vec::with_capacity(128 * 6);
         for address in 0..128_u16 {
             let coefficient = coefficients.get(usize::from(address)).copied().unwrap_or(0);
             let bytes = coefficient.to_le_bytes();
-            io.write(base, address as u8).await?;
-            io.write(base + 1, bytes[0]).await?;
-            io.write(base + 2, bytes[1]).await?;
-            io.write(base + 5, tap_bits | chain_bits | 0x06).await?;
-            io.write(base + 4, 0).await?;
-            io.write(base + 4, 0).await?;
+            writes.extend_from_slice(&[
+                (base, address as u8),
+                (base + 1, bytes[0]),
+                (base + 2, bytes[1]),
+                (base + 5, tap_bits | chain_bits | 0x06),
+                (base + 4, 0),
+                (base + 4, 0),
+            ]);
         }
+        let started = web_time::Instant::now();
+        log::info!(
+            "Loading AD9361 {direction:?} FIR coefficients ({} register writes)",
+            writes.len()
+        );
+        io.write_many(&writes).await?;
+        log::info!(
+            "AD9361 {direction:?} FIR loaded in {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
         io.write(base + 5, tap_bits | chain_bits | 0x02).await?;
         io.write(base + 5, tap_bits | chain_bits).await?;
         if direction == Direction::Rx {
@@ -771,16 +793,29 @@ impl Ad9361Controller {
         }
         self.current_gain_table = table_number;
         io.write(0x137, 0x1a).await?;
+        let mut writes = Vec::with_capacity(91 * 7);
         for index in 0_u8..91 {
             let entry = table.get(usize::from(index)).copied().unwrap_or([0; 3]);
-            io.write(0x130, index).await?;
-            io.write(0x131, entry[0]).await?;
-            io.write(0x132, entry[1]).await?;
-            io.write(0x133, entry[2]).await?;
-            io.write(0x137, 0x1e).await?;
-            io.write(0x134, 0).await?;
-            io.write(0x134, 0).await?;
+            writes.extend_from_slice(&[
+                (0x130, index),
+                (0x131, entry[0]),
+                (0x132, entry[1]),
+                (0x133, entry[2]),
+                (0x137, 0x1e),
+                (0x134, 0),
+                (0x134, 0),
+            ]);
         }
+        let started = web_time::Instant::now();
+        log::info!(
+            "Loading AD9361 gain table {table_number} ({} register writes)",
+            writes.len()
+        );
+        io.write_many(&writes).await?;
+        log::info!(
+            "AD9361 gain table loaded in {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
         io.write(0x137, 0x1a).await?;
         io.write(0x134, 0).await?;
         io.write(0x134, 0).await?;

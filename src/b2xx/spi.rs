@@ -112,6 +112,30 @@ impl<'a> Ad9361Io<'a> {
         Self { spi }
     }
 
+    /// Load a consecutive table without crossing a read, delay or calibration barrier.
+    pub(crate) async fn write_registers(&mut self, registers: &[(u16, u8)]) -> Result<()> {
+        for &(register, _) in registers {
+            validate_ad9361_register(register)?;
+        }
+        let divider = self.spi.default_divider;
+        let control = control_word(AD9361_SLAVE, ad9361_spi_config(), 24);
+        let mut writes = Vec::with_capacity(registers.len() + 2);
+        if self.spi.divider_cache != Some(divider) {
+            writes.push((SPI_DIVIDER_ADDRESS, divider));
+        }
+        if self.spi.control_cache != Some(control) {
+            writes.push((SPI_CONTROL_ADDRESS, control));
+        }
+        for &(register, value) in registers {
+            let command = 0x0080_0000 | (u32::from(register) << 8) | u32::from(value);
+            writes.push((SPI_DATA_ADDRESS, command << 8));
+        }
+        self.spi.control.poke32_many(&writes).await?;
+        self.spi.divider_cache = Some(divider);
+        self.spi.control_cache = Some(control);
+        Ok(())
+    }
+
     pub async fn read_register(&mut self, register: u16) -> Result<u8> {
         validate_ad9361_register(register)?;
         let command = u32::from(register) << 8;

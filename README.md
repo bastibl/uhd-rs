@@ -106,6 +106,29 @@ cargo check --target wasm32-unknown-unknown --all-targets
 
 Permission requests are separate from opening. Browser firmware loading uses device-level control transfers without claiming interface zero, so dropping the disconnected bootloader handle does not try to release an interface. Reconnection retains the selected device's serial, including in bootloader mode. If a re-enumerated device cannot be identified among authorized devices, opening returns `Error::PermissionRequired`; request a new user gesture and select it again. Devices without a known serial, or whose serial changes after firmware loading, cannot safely be matched across browser reconnection.
 
+AD9361 FIR and gain-table loading uses a continuously replenished window of up to
+64 consecutive register writes in the browser. Each command has its receive posted
+before submission; both OUT completions and matching acknowledgements are checked.
+The entire window is drained before returning, so reads, delays and calibration
+polls retain their ordering. The
+[B200 control processor](https://github.com/EttusResearch/uhd/blob/master/fpga/usrp3/lib/control_200/radio_ctrl_proc.v)
+waits for SPI readiness before accepting the next write; this host queue does not
+bypass that hardware flow control. Failed or cancelled pipelines require reopening.
+Native register writes retain their existing serialized behavior. FPGA image writes
+remain sequential on both targets; their small firmware buffers can make browser
+startup sensitive to per-transfer latency. Logs report upload progress in 10% steps
+and FIR/gain-table loading times to distinguish these phases.
+
+In a B210 USB 3 / Chrome hardware comparison, 768-write FIR tables took
+1.12–1.19 s at window 3, 0.495 s at 8, 0.285 s at 16, 0.132–0.155 s at 32,
+and 0.064–0.095 s at 64. With the final window of 64, radio initialization took
+16.3–17.3 s versus 25.7 s with the old three-write batches; these runs reused loaded
+firmware and FPGA images. These are observed diagnostic timings, not guarantees
+for other devices or hosts. Debug logging can report aggregate submission time
+and observed OUT/ACK latency. Those timestamps include host queueing and Rust
+wakeups; they do not isolate browser service time or physical USB latency.
+Profiling clocks are disabled when debug logging is disabled.
+
 Stopping RX leaves the browser USB device open. After closing or losing a stream that submitted transfers, `rx_stream` returns `ReopenRequired`: call `shutdown`, then open a new `Device`. WebUSB cannot cancel individual transfers. Terminal shutdown awaits the retained browser `UsbDevice.close()`, aborting pending operations and releasing interfaces. Drop cleanup retains ownership until its background attempt finishes.
 
 ## Examples and diagnostics
