@@ -32,7 +32,14 @@ use io::{Endpoint, Radio};
 
 pub type DeviceDescriptor = b2xx::B2xxDeviceInfo;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
-const QUEUE_DEPTH: usize = 64;
+// A 64-packet queue covers only 13 ms at 20 MS/s. Browser rendering and GC
+// can delay WebUSB completion callbacks longer than that. Keep about 105 ms
+// queued on wasm (34 ms at 61.44 MS/s) without increasing read batch latency.
+const QUEUE_DEPTH: usize = if cfg!(target_arch = "wasm32") {
+    512
+} else {
+    64
+};
 const TRANSFER_BYTES: usize = 16_384;
 // Bound work per call while amortizing downstream scheduling across ready packets.
 const READ_BATCH_PACKETS: usize = 4;
