@@ -34,6 +34,8 @@ pub type DeviceDescriptor = b2xx::B2xxDeviceInfo;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const QUEUE_DEPTH: usize = 64;
 const TRANSFER_BYTES: usize = 16_384;
+// Bound work per call while amortizing downstream scheduling across ready packets.
+const READ_BATCH_PACKETS: usize = 4;
 
 /// Cumulative statistics for this stream, including restarts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -127,6 +129,7 @@ impl Device {
             shared: self.shared.clone(),
             endpoint: Some(endpoint),
             buffer: SampleBuffer::default(),
+            pending_error: None,
             sequence: RxSequenceState::Synchronizing,
             running: false,
             failed: false,
@@ -513,6 +516,7 @@ pub struct RxStream {
     shared: Owner<Shared>,
     endpoint: Option<Endpoint>,
     buffer: SampleBuffer,
+    pending_error: Option<Error>,
     sequence: RxSequenceState,
     running: bool,
     failed: bool,
@@ -535,6 +539,7 @@ impl RxStream {
             return Ok(());
         }
         self.buffer.clear();
+        self.pending_error = None;
         self.sequence = RxSequenceState::Synchronizing;
         let mut radio = self.shared.radio.lock().await;
         self.shared.active()?;
@@ -563,10 +568,13 @@ impl RxStream {
     async fn stop_async(&mut self) -> Result<()> {
         self.running = false;
         self.buffer.clear();
+        self.pending_error = None;
         let mut guard = self.shared.radio.lock().await;
         guard.as_mut().ok_or(Error::Shutdown)?.stop().await
     }
     /// Return available samples promptly; retain the unread part of a packet.
+    /// After the first samples, include up to four already-completed packets
+    /// without waiting for another USB transfer. Short reads remain valid.
     /// A timeout leaves pending transfers queued and the stream usable.
     pub fn read<'a>(
         &'a mut self,
@@ -586,65 +594,99 @@ impl RxStream {
         if output.is_empty() {
             return Ok(0);
         }
-        let count = self.buffer.copy(output);
-        if count != 0 {
-            self.stats.samples += count as u64;
-            return Ok(count);
+        if let Some(error) = self.pending_error.take() {
+            self.receive_error(error).await?;
         }
+        let mut count = self.buffer.copy(output);
+        let mut packets = 0;
         let start = web_time::Instant::now();
-        loop {
+        while count < output.len() && (count == 0 || packets < READ_BATCH_PACKETS) {
             let remaining = timeout
                 .map(|t| t.saturating_sub(start.elapsed()))
                 .unwrap_or(Duration::from_secs(86400));
             let ep = self.endpoint.as_mut().ok_or(Error::StreamClosed)?;
-            let completion = ep.complete(remaining).await;
+            let completion = if count == 0 {
+                ep.complete(remaining).await
+            } else {
+                // Never suspend after copying samples into the caller's buffer.
+                // Returning now also keeps low-rate streams responsive.
+                let Some(completion) = futures_lite::future::poll_once(ep.next_complete()).await
+                else {
+                    break;
+                };
+                Ok(completion)
+            };
             let completion = match completion {
                 Ok(c) => c,
                 Err(Error::Timeout) if timeout.is_none() => continue,
                 Err(e) => return Err(e),
             };
             if let Err(error) = completion.status {
-                self.failed = true;
-                self.running = false;
-                return Err(error.into());
+                if count != 0 {
+                    self.pending_error = Some(error.into());
+                    break;
+                }
+                self.receive_error(error.into()).await?;
             }
+            packets += 1;
             self.stats.transfers += 1;
             let bytes = &completion.buffer[..completion.actual_len];
-            let decoded = self.decode(bytes);
+            let decoded = self.decode(bytes, &mut output[count..]);
             let mut buffer = completion.buffer;
             buffer.clear();
             buffer.set_requested_len(TRANSFER_BYTES);
             self.endpoint.as_mut().unwrap().submit(buffer);
             match decoded {
-                Ok(true) => {
-                    let count = self.buffer.copy(output);
-                    if count != 0 {
-                        self.stats.samples += count as u64;
-                        return Ok(count);
-                    }
+                Ok(n) => count += n,
+                Err(error) if count != 0 => {
+                    // Deliver the samples already copied. Report/recover the
+                    // following error on the next read, without losing that data
+                    // or suspending halfway through an overflow restart.
+                    self.pending_error = Some(error);
+                    break;
                 }
-                Ok(false) => {}
-                Err(Error::DeviceReceiveOverflow { .. }) => {
-                    self.stats.overflows += 1;
-                    self.running = false;
-                    self.start_async().await?;
-                }
-                Err(Error::ReceiveOverflow { .. }) => {
-                    self.stats.overflows += 1;
-                }
-                Err(error) => {
-                    self.failed = true;
-                    self.running = false;
-                    return Err(error);
-                }
+                Err(error) => self.receive_error(error).await?,
             }
             if timeout.is_some_and(|t| start.elapsed() >= t) {
-                return Err(Error::Timeout);
+                if count == 0 {
+                    return Err(Error::Timeout);
+                }
+                break;
+            }
+        }
+        self.stats.samples += count as u64;
+        Ok(count)
+    }
+    async fn receive_error(&mut self, error: Error) -> Result<()> {
+        match error {
+            Error::DeviceReceiveOverflow { .. } => {
+                self.stats.overflows += 1;
+                log::warn!(
+                    "UHD RX FIFO overflow; restarting reception ({} total)",
+                    self.stats.overflows
+                );
+                self.running = false;
+                self.start_async().await
+            }
+            Error::ReceiveOverflow { expected, actual } => {
+                self.stats.overflows += 1;
+                log::warn!(
+                    "UHD RX packet loss: expected sequence {expected}, got {actual} ({} overflows total)",
+                    self.stats.overflows
+                );
+                Ok(())
+            }
+            error => {
+                self.failed = true;
+                self.running = false;
+                Err(error)
             }
         }
     }
-    fn decode(&mut self, bytes: &[u8]) -> Result<bool> {
-        use b2xx::rx::{RX_CONTEXT_OVERFLOW, RX_DATA_STREAM_ID, decode_sc16, receive_context_code};
+    fn decode(&mut self, bytes: &[u8], output: &mut [Complex32]) -> Result<usize> {
+        use b2xx::rx::{
+            RX_CONTEXT_OVERFLOW, RX_DATA_STREAM_ID, receive_context_code, sc16_samples,
+        };
         let packet = crate::chdr::parse(bytes)?;
         if packet.stream_id != RX_DATA_STREAM_ID {
             return Err(Error::Chdr(format!(
@@ -666,17 +708,28 @@ impl RxStream {
             });
         }
         match self.sequence.observe(packet.sequence) {
-            SequenceDisposition::Discard => Ok(false),
+            SequenceDisposition::Discard => Ok(0),
             SequenceDisposition::Overflow { expected, actual } => {
                 Err(Error::ReceiveOverflow { expected, actual })
             }
             SequenceDisposition::Accept => {
-                decode_sc16(
+                let samples = sc16_samples(
                     packet.payload,
                     f32::from_bits(self.shared.scale.load(Ordering::Relaxed)),
-                    &mut self.buffer.samples,
                 )?;
-                Ok(true)
+                let n = samples.len();
+                if n <= output.len() {
+                    // Decode straight into the caller's stream buffer. Only
+                    // partial packets need the intermediate sample buffer.
+                    for (out, sample) in output.iter_mut().zip(samples) {
+                        *out = sample;
+                    }
+                    Ok(n)
+                } else {
+                    self.buffer.samples.clear();
+                    self.buffer.samples.extend(samples);
+                    Ok(self.buffer.copy(output))
+                }
             }
         }
     }
@@ -742,6 +795,7 @@ impl Drop for RxStream {
                 shared: self.shared.clone(),
                 endpoint: self.endpoint.take(),
                 buffer: SampleBuffer::default(),
+                pending_error: None,
                 sequence: self.sequence,
                 running: self.running,
                 failed: self.failed,

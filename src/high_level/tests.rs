@@ -65,6 +65,121 @@ fn read_partial_buffers_and_no_control_lock_on_reads() {
     d.shutdown().wait().unwrap();
 }
 #[test]
+fn ready_packets_are_batched_without_waiting_for_another_transfer() {
+    let (mut d, io) = device();
+    let mut rx = d.rx_stream().unwrap();
+    rx.start().wait().unwrap();
+    packet(&io, 0, &[1., 2.]);
+    packet(&io, 1, &[3., 4.]);
+    let mut out = [Complex32::default(); 16];
+    let read = rx
+        .read(&mut out, Some(Duration::from_secs(1)))
+        .into_future();
+    // The output isn't full and the next transfer never completes. This poll
+    // must still return the already received samples immediately.
+    assert_eq!(block_on(poll_once(read)).unwrap().unwrap(), 4);
+    assert_eq!(
+        out[..4].iter().map(|x| x.re).collect::<Vec<_>>(),
+        [1., 2., 3., 4.]
+    );
+    assert_eq!(rx.stats().samples, 4);
+    assert_eq!(rx.stats().transfers, 2);
+    assert!(
+        rx.buffer.samples.is_empty(),
+        "whole packets decode into the caller's buffer"
+    );
+    assert_eq!(rx.buffer.samples.capacity(), 0);
+    assert_eq!(io.0.lock().unwrap().submitted, QUEUE_DEPTH + 2);
+    rx.close().wait().unwrap();
+}
+#[test]
+fn ready_packet_batch_is_bounded_and_retains_partial_packets() {
+    let (mut d, io) = device();
+    let mut rx = d.rx_stream().unwrap();
+    rx.start().wait().unwrap();
+    for seq in 0..6 {
+        packet(&io, seq, &[f32::from(seq)]);
+    }
+    let mut out = [Complex32::default(); 16];
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), READ_BATCH_PACKETS);
+    assert_eq!(
+        out[..4].iter().map(|x| x.re).collect::<Vec<_>>(),
+        [0., 1., 2., 3.]
+    );
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 2);
+    packet(&io, 6, &[6., 7., 8.]);
+    packet(&io, 7, &[9., 10.]);
+    assert_eq!(rx.read(&mut out[..2], None).wait().unwrap(), 2);
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 3);
+    assert_eq!(
+        out[..3].iter().map(|x| x.re).collect::<Vec<_>>(),
+        [8., 9., 10.]
+    );
+    assert_eq!(rx.stats().samples, 11);
+    rx.close().wait().unwrap();
+}
+#[test]
+fn error_after_valid_samples_is_reported_on_the_following_read() {
+    let (mut d, io) = device();
+    let mut rx = d.rx_stream().unwrap();
+    rx.start().wait().unwrap();
+    packet(&io, 0, &[1., 2.]);
+    io.0.lock().unwrap().packets.push_back(Ok(vec![0; 3]));
+    let mut out = [Complex32::default(); 16];
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 2);
+    assert_eq!(out[1].re, 2.);
+    assert!(matches!(
+        rx.read(&mut out, None).wait(),
+        Err(Error::Chdr(_))
+    ));
+    assert!(matches!(
+        rx.read(&mut out, None).wait(),
+        Err(Error::StreamClosed)
+    ));
+    assert_eq!(rx.stats().samples, 2);
+    rx.close().wait().unwrap();
+}
+#[test]
+fn batch_ends_at_sequence_gap_and_recovers_on_following_read() {
+    let (mut d, io) = device();
+    let mut rx = d.rx_stream().unwrap();
+    rx.start().wait().unwrap();
+    packet(&io, 0, &[1., 2.]);
+    packet(&io, 2, &[3.]);
+    packet(&io, 3, &[4., 5.]);
+    let mut out = [Complex32::default(); 16];
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 2);
+    assert_eq!(out[0].re, 1.);
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 2);
+    assert_eq!(out[0].re, 4.);
+    assert_eq!(rx.stats().overflows, 1);
+    assert_eq!(rx.stats().samples, 4);
+    rx.close().wait().unwrap();
+}
+#[test]
+fn fifo_overflow_after_samples_is_restarted_on_the_following_read() {
+    let (mut d, io) = device();
+    let mut rx = d.rx_stream().unwrap();
+    rx.start().wait().unwrap();
+    packet(&io, 0, &[1., 2.]);
+    io.0.lock()
+        .unwrap()
+        .packets
+        .push_back(Ok(crate::chdr::encode_control(0xa0, 1, 8, 0, None)));
+    let mut out = [Complex32::default(); 16];
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 2);
+    assert!(matches!(
+        rx.read(&mut out, Some(Duration::from_millis(1))).wait(),
+        Err(Error::Timeout)
+    ));
+    assert_eq!(rx.stats().overflows, 1);
+    assert_eq!(io.0.lock().unwrap().events, ["start", "start"]);
+    packet(&io, 0, &[3.]);
+    assert_eq!(rx.read(&mut out, None).wait().unwrap(), 1);
+    assert_eq!(out[0].re, 3.);
+    rx.close().wait().unwrap();
+}
+#[test]
 fn pending_read_timeout_and_cancellation_reuse_queue() {
     let (mut d, io) = device();
     let mut rx = d.rx_stream().unwrap();

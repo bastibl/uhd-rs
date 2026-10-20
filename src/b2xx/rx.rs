@@ -684,21 +684,22 @@ async fn issue_stream_command(control: &mut RadioControl, command: StreamCommand
     control.poke32(RX_CTRL_TIME_LOW, 0).await
 }
 
-pub(crate) fn decode_sc16(bytes: &[u8], scale: f32, output: &mut Vec<Complex32>) -> Result<()> {
+pub(crate) fn sc16_samples(
+    bytes: &[u8],
+    scale: f32,
+) -> Result<impl ExactSizeIterator<Item = Complex32> + '_> {
     if !bytes.len().is_multiple_of(4) {
         return Err(Error::Chdr(format!(
             "sc16 receive payload has {} bytes, not a whole number of complex samples",
             bytes.len()
         )));
     }
-    output.clear();
     // UHD packs I in the high half and Q in the low half of each LE word.
-    output.extend(bytes.as_chunks::<4>().0.iter().map(|sample| {
+    Ok(bytes.as_chunks::<4>().0.iter().map(move |sample| {
         let im = i16::from_le_bytes([sample[0], sample[1]]);
         let re = i16::from_le_bytes([sample[2], sample[3]]);
         Complex32::new(f32::from(re) * scale, f32::from(im) * scale)
-    }));
-    Ok(())
+    }))
 }
 
 #[cfg(test)]
@@ -904,17 +905,14 @@ mod tests {
     #[test]
     fn decodes_normalized_sc16_in_uhd_word_order() {
         let bytes = [0xfc, 0xff, 2, 0, 0xff, 0x7f, 0, 0x80];
-        let mut output = Vec::new();
-        decode_sc16(&bytes, 0.25, &mut output).unwrap();
+        let output: Vec<_> = sc16_samples(&bytes, 0.25).unwrap().collect();
         assert_eq!(
             output,
             [Complex32::new(0.5, -1.0), Complex32::new(-8192.0, 8191.75)]
         );
-        let capacity = output.capacity();
-        decode_sc16(&bytes[..4], 0.5, &mut output).unwrap();
+        let output: Vec<_> = sc16_samples(&bytes[..4], 0.5).unwrap().collect();
         assert_eq!(output, [Complex32::new(1.0, -2.0)]);
-        assert_eq!(output.capacity(), capacity);
-        assert!(decode_sc16(&bytes[..7], 1.0, &mut output).is_err());
+        assert!(sc16_samples(&bytes[..7], 1.0).is_err());
     }
 
     #[test]

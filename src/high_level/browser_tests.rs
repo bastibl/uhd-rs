@@ -21,6 +21,36 @@ async fn tick() {
     futures_timer::Delay::new(Duration::from_millis(20)).await;
 }
 #[wasm_bindgen_test]
+async fn ready_packet_batch_returns_without_waiting_and_decodes_multiple_packets() {
+    let (mut d, io) = device();
+    let mut rx = d.rx_stream().unwrap();
+    rx.start().await.unwrap();
+    for (sequence, payload) in [(0, vec![1, 0, 2, 0, 3, 0, 4, 0]), (1, vec![5, 0, 6, 0])] {
+        io.0.lock()
+            .unwrap()
+            .packets
+            .push_back(Ok(crate::chdr::encode_data(
+                0xa0, sequence, &payload, None, false,
+            )
+            .unwrap()));
+    }
+    let mut out = [Complex32::default(); 16];
+    let read = rx.read(&mut out, None).into_future();
+    assert_eq!(poll_once(read).await.unwrap().unwrap(), 3);
+    assert_eq!(
+        out[..3],
+        [
+            Complex32::new(2., 1.),
+            Complex32::new(4., 3.),
+            Complex32::new(6., 5.)
+        ]
+    );
+    assert_eq!(rx.stats().samples, 3);
+    assert_eq!(rx.stats().transfers, 2);
+    rx.close().await.unwrap();
+    d.shutdown().await.unwrap();
+}
+#[wasm_bindgen_test]
 async fn deferred_drop_keeps_claim_until_cleanup_finishes() {
     let (mut d, io) = device();
     let mut rx = d.rx_stream().unwrap();
