@@ -1,6 +1,6 @@
 //! Owned channel-zero RX API.
 use crate::{
-    Complex32, Error, Result, RxConfig, RxGain, RxTuneRequest, RxTuneResult,
+    Complex32, Error, Result, RxAntenna, RxConfig, RxGain, RxTuneRequest, RxTuneResult,
     b2xx::{
         self,
         rx::{B2xxReceiver, RxSequenceState, SequenceDisposition},
@@ -175,6 +175,81 @@ impl Device {
             radio.as_mut().ok_or(Error::Shutdown)?.set_gain(gain).await
         })
     }
+
+    /// Return the selected receive connector.
+    pub fn antenna(&self) -> impl MaybeFuture<Output = Result<RxAntenna>> + '_ {
+        operation(async move {
+            let guard = self.shared.radio.lock().await;
+            self.shared.active()?;
+            guard.as_ref().ok_or(Error::Shutdown)?.antenna()
+        })
+    }
+
+    /// Select RX2 or the shared TX/RX connector for reception.
+    pub fn set_antenna(
+        &mut self,
+        antenna: RxAntenna,
+    ) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        operation(async move {
+            let mut guard = self.shared.radio.lock().await;
+            self.shared.active()?;
+            guard
+                .as_mut()
+                .ok_or(Error::Shutdown)?
+                .set_antenna(antenna)
+                .await
+        })
+    }
+
+    /// Return the configured analog receive bandwidth in Hz.
+    pub fn bandwidth(&self) -> impl MaybeFuture<Output = Result<f64>> + '_ {
+        operation(async move {
+            let guard = self.shared.radio.lock().await;
+            self.shared.active()?;
+            guard.as_ref().ok_or(Error::Shutdown)?.bandwidth()
+        })
+    }
+
+    /// Set analog receive bandwidth (200 kHz through 56 MHz), limited by the
+    /// master clock, and return the applied value. Zero restores automatic
+    /// bandwidth following the master clock. Manual requests persist across
+    /// clock changes and are reapplied within the new clock's limit.
+    pub fn set_bandwidth(&mut self, hz: f64) -> impl MaybeFuture<Output = Result<f64>> + '_ {
+        operation(async move {
+            let mut guard = self.shared.radio.lock().await;
+            self.shared.active()?;
+            guard
+                .as_mut()
+                .ok_or(Error::Shutdown)?
+                .set_bandwidth(hz)
+                .await
+        })
+    }
+
+    /// Return whether automatic baseband DC offset correction is enabled.
+    pub fn dc_offset_enabled(&self) -> impl MaybeFuture<Output = Result<bool>> + '_ {
+        operation(async move {
+            let guard = self.shared.radio.lock().await;
+            self.shared.active()?;
+            guard.as_ref().ok_or(Error::Shutdown)?.dc_offset_enabled()
+        })
+    }
+
+    /// Toggle baseband DC tracking, retaining static RF and BB calibration.
+    pub fn set_dc_offset_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        operation(async move {
+            let mut guard = self.shared.radio.lock().await;
+            self.shared.active()?;
+            guard
+                .as_mut()
+                .ok_or(Error::Shutdown)?
+                .set_dc_offset_enabled(enabled)
+                .await
+        })
+    }
     /// Terminal once polled. Busy rejection is nonterminal. Failures may be retried.
     pub fn shutdown(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         operation(async move {
@@ -207,6 +282,9 @@ pub struct DeviceBuilder {
     serial: Option<String>,
     config: RxConfig,
     lo_offset: f64,
+    antenna: RxAntenna,
+    bandwidth_hz: f64,
+    dc_offset_enabled: bool,
     images: ImageCatalog,
     reload_firmware: bool,
     reconnect_timeout: Duration,
@@ -222,6 +300,9 @@ impl Default for DeviceBuilder {
                 gain: RxGain::Manual(30.0),
             },
             lo_offset: 0.0,
+            antenna: RxAntenna::Rx2,
+            bandwidth_hz: 0.0,
+            dc_offset_enabled: true,
             images: ImageCatalog::default(),
             reload_firmware: false,
             reconnect_timeout: Duration::from_secs(10),
@@ -253,6 +334,21 @@ impl DeviceBuilder {
         self.lo_offset = hz;
         self
     }
+    /// Select the receive connector; defaults to RX2.
+    pub fn antenna(mut self, antenna: RxAntenna) -> Self {
+        self.antenna = antenna;
+        self
+    }
+    /// Select analog bandwidth in Hz; zero (the default) follows the master clock.
+    pub fn bandwidth_hz(mut self, hz: f64) -> Self {
+        self.bandwidth_hz = hz;
+        self
+    }
+    /// Enable or disable automatic DC offset correction; enabled by default.
+    pub fn dc_offset_enabled(mut self, enabled: bool) -> Self {
+        self.dc_offset_enabled = enabled;
+        self
+    }
     pub fn image(mut self, image: Image, bytes: impl Into<Vec<u8>>) -> Self {
         self.images.insert(image, bytes);
         self
@@ -274,8 +370,9 @@ impl DeviceBuilder {
     }
     async fn open_async(self) -> Result<Device> {
         self.config.validate()?;
+        b2xx::rx::validate_bandwidth(self.bandwidth_hz)?;
         let tune = RxTuneRequest::with_lo_offset(self.config.center_frequency_hz, self.lo_offset)
-            .validate()?;
+            .validate_for_clock(b2xx::rx::clock_for_rate(self.config.sample_rate_hz))?;
         let info = match self.descriptor {
             Some(info) => info,
             None => {
@@ -312,6 +409,15 @@ impl DeviceBuilder {
         };
         if self.lo_offset != 0.0 {
             device.tune(tune).await?;
+        }
+        if self.antenna != RxAntenna::Rx2 {
+            device.set_antenna(self.antenna).await?;
+        }
+        if self.bandwidth_hz != 0.0 {
+            device.set_bandwidth(self.bandwidth_hz).await?;
+        }
+        if !self.dc_offset_enabled {
+            device.set_dc_offset_enabled(false).await?;
         }
         Ok(device)
     }

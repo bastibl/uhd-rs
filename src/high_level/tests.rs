@@ -247,3 +247,50 @@ fn failed_close_requires_terminal_cleanup_retry() {
     io.0.lock().unwrap().fail = None;
     d.shutdown().wait().unwrap();
 }
+
+#[test]
+fn rx_controls_are_lazy_and_cancelled_configuration_is_unknown() {
+    let (mut d, io) = device();
+    drop(d.set_antenna(RxAntenna::TxRx));
+    drop(d.set_bandwidth(2e6));
+    drop(d.set_dc_offset_enabled(false));
+    assert!(io.0.lock().unwrap().events.is_empty());
+    assert_eq!(d.antenna().wait().unwrap(), RxAntenna::Rx2);
+    assert!(d.dc_offset_enabled().wait().unwrap());
+    io.0.lock().unwrap().pause = Some("bandwidth");
+    let mut change = Box::pin(d.set_bandwidth(2e6).into_future());
+    assert!(block_on(poll_once(change.as_mut())).is_none());
+    drop(change);
+    assert!(matches!(d.bandwidth().wait(), Err(Error::ReopenRequired)));
+    io.0.lock().unwrap().pause = None;
+    assert_eq!(d.set_bandwidth(2e6).wait().unwrap(), 2e6);
+    d.set_antenna(RxAntenna::TxRx).wait().unwrap();
+    d.set_dc_offset_enabled(false).wait().unwrap();
+    assert_eq!(d.antenna().wait().unwrap(), RxAntenna::TxRx);
+    assert!(!d.dc_offset_enabled().wait().unwrap());
+    assert!(matches!(
+        d.set_bandwidth(f64::NAN).wait(),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert_eq!(d.bandwidth().wait().unwrap(), 2e6);
+    d.shutdown().wait().unwrap();
+    assert!(matches!(d.antenna().wait(), Err(Error::Shutdown)));
+}
+
+#[test]
+fn builder_rejects_invalid_bandwidth_before_discovery() {
+    for hz in [f64::NAN, f64::INFINITY, -1.0, 199_999.0, 56_000_001.0] {
+        assert!(matches!(
+            Device::builder().bandwidth_hz(hz).open().wait(),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+    assert!(matches!(
+        Device::builder()
+            .sample_rate_hz(16e6)
+            .lo_offset_hz(9e6)
+            .open()
+            .wait(),
+        Err(Error::InvalidArgument(_))
+    ));
+}

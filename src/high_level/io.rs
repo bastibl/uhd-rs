@@ -103,6 +103,65 @@ impl Radio {
             }
         }
     }
+    pub fn antenna(&self) -> Result<RxAntenna> {
+        match self {
+            Self::Hardware(r) => r.antenna(),
+            #[cfg(test)]
+            Self::Fake(r) => r.antenna.ok_or(Error::ReopenRequired),
+        }
+    }
+    pub async fn set_antenna(&mut self, antenna: RxAntenna) -> Result<()> {
+        match self {
+            Self::Hardware(r) => r.set_antenna(antenna).await,
+            #[cfg(test)]
+            Self::Fake(r) => {
+                r.antenna = None;
+                r.io.event("antenna").await?;
+                r.antenna = Some(antenna);
+                Ok(())
+            }
+        }
+    }
+    pub fn bandwidth(&self) -> Result<f64> {
+        match self {
+            Self::Hardware(r) => r.bandwidth(),
+            #[cfg(test)]
+            Self::Fake(r) => r.bandwidth.ok_or(Error::ReopenRequired),
+        }
+    }
+    pub async fn set_bandwidth(&mut self, hz: f64) -> Result<f64> {
+        match self {
+            Self::Hardware(r) => r.set_bandwidth(hz).await,
+            #[cfg(test)]
+            Self::Fake(r) => {
+                b2xx::rx::validate_bandwidth(hz)?;
+                r.bandwidth = None;
+                r.io.event("bandwidth").await?;
+                let hz = if hz == 0.0 { 32e6 } else { hz.min(32e6) };
+                r.bandwidth = Some(hz);
+                Ok(hz)
+            }
+        }
+    }
+    pub fn dc_offset_enabled(&self) -> Result<bool> {
+        match self {
+            Self::Hardware(r) => r.dc_offset_enabled(),
+            #[cfg(test)]
+            Self::Fake(r) => r.dc_offset_enabled.ok_or(Error::ReopenRequired),
+        }
+    }
+    pub async fn set_dc_offset_enabled(&mut self, enabled: bool) -> Result<()> {
+        match self {
+            Self::Hardware(r) => r.set_dc_offset_enabled(enabled).await,
+            #[cfg(test)]
+            Self::Fake(r) => {
+                r.dc_offset_enabled = None;
+                r.io.event("dc_offset").await?;
+                r.dc_offset_enabled = Some(enabled);
+                Ok(())
+            }
+        }
+    }
     pub async fn set_gain(&mut self, gain: RxGain) -> Result<()> {
         match self {
             Self::Hardware(r) => r.set_gain(gain).await,
@@ -190,6 +249,9 @@ impl TestIo {
         Radio::Fake(FakeRadio {
             io: self.clone(),
             running: false,
+            antenna: Some(RxAntenna::Rx2),
+            bandwidth: Some(32e6),
+            dc_offset_enabled: Some(true),
             endpoint: Some(FakeEndpoint {
                 io: self.clone(),
                 pending: 0,
@@ -202,6 +264,9 @@ impl TestIo {
 pub(super) struct FakeRadio {
     io: TestIo,
     running: bool,
+    antenna: Option<RxAntenna>,
+    bandwidth: Option<f64>,
+    dc_offset_enabled: Option<bool>,
     endpoint: Option<FakeEndpoint>,
 }
 #[cfg(test)]

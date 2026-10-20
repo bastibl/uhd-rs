@@ -14,7 +14,7 @@ pub use device::{B2xxDeviceInfo, list_devices, request_device};
 pub use fx3::{
     B2xxDevice, B2xxIdentity, FirmwareCompatibility, Fx3State, LoadOutcome, UsbSpeed, image_hash,
 };
-pub use rx::{RxConfig, RxGain, RxTuneRequest, RxTuneResult};
+pub use rx::{RxAntenna, RxConfig, RxGain, RxTuneRequest, RxTuneResult};
 pub use session::{B2xxSession, FpgaCompatibility};
 pub use spi::{Ad9361Io, B2xxSpi, SpiConfig, SpiEdge};
 pub use transport::{B2xxTransport, RadioControl, StreamId};

@@ -333,3 +333,77 @@ fn b210_radio_initialization_and_release() {
             .unwrap();
     });
 }
+
+#[test]
+#[ignore = "requires B2xx; verifies antenna, bandwidth, DC correction and wide LO offsets"]
+fn b2xx_receive_controls() {
+    use uhd_rs::{Error, RxAntenna, RxTuneRequest};
+    let mut device = Device::builder()
+        .descriptor(descriptor())
+        .sample_rate_hz(20e6)
+        .antenna(RxAntenna::TxRx)
+        .bandwidth_hz(2e6)
+        .dc_offset_enabled(false)
+        .lo_offset_hz(9e6)
+        .open()
+        .wait()
+        .unwrap();
+    let mut rx = device.rx_stream().unwrap();
+    let result = (|| -> uhd_rs::Result<()> {
+        let mut samples = [Complex32::default(); 4086];
+        assert_eq!(device.antenna().wait()?, RxAntenna::TxRx);
+        assert_eq!(device.bandwidth().wait()?, 2e6);
+        assert!(!device.dc_offset_enabled().wait()?);
+        rx.start().wait()?;
+        for antenna in [RxAntenna::TxRx, RxAntenna::Rx2] {
+            device.set_antenna(antenna).wait()?;
+            for enabled in [true, false] {
+                device.set_dc_offset_enabled(enabled).wait()?;
+                assert_eq!(device.dc_offset_enabled().wait()?, enabled);
+                let count = rx.read(&mut samples, Some(Duration::from_secs(3))).wait()?;
+                assert!(count > 0 && samples[..count].iter().any(|s| s.norm_sqr() > 0.0));
+                println!(
+                    "{}: {count} samples, DC correction {enabled}",
+                    antenna.as_str()
+                );
+            }
+            assert_eq!(device.antenna().wait()?, antenna);
+        }
+        assert_eq!(device.set_bandwidth(0.0).wait()?, 20e6);
+        assert_eq!(device.set_bandwidth(2e6).wait()?, 2e6);
+        rx.stop().wait()?;
+        device.set_center_frequency(3e9).wait()?;
+        device.set_sample_rate(7e6).wait()?;
+        assert_eq!(device.bandwidth().wait()?, 2e6);
+        assert!(!device.dc_offset_enabled().wait()?);
+        assert_eq!(device.set_bandwidth(50e6).wait()?, 50e6);
+        device.set_sample_rate(16e6).wait()?;
+        assert_eq!(device.bandwidth().wait()?, 16e6);
+        device.set_sample_rate(7e6).wait()?;
+        assert_eq!(device.bandwidth().wait()?, 50e6);
+        assert_eq!(device.set_bandwidth(0.0).wait()?, 56e6);
+        device.set_sample_rate(1e6).wait()?;
+        assert_eq!(device.bandwidth().wait()?, 32e6);
+        device.set_sample_rate(61.44e6).wait()?;
+        let tune = device
+            .tune(RxTuneRequest::with_lo_offset(100e6, 20e6))
+            .wait()?;
+        assert!((tune.actual_center_frequency_hz - 100e6).abs() < 1.0);
+        assert!(matches!(
+            device.set_sample_rate(16e6).wait(),
+            Err(Error::InvalidArgument(_))
+        ));
+        rx.start().wait()?;
+        assert!(rx.read(&mut samples, Some(Duration::from_secs(3))).wait()? > 0);
+        rx.stop().wait()?;
+        device.set_center_frequency(100e6).wait()?;
+        device.set_sample_rate(1e6).wait()?;
+        device.set_dc_offset_enabled(true).wait()?;
+        Ok(())
+    })();
+    let close = rx.close().wait();
+    let shutdown = device.shutdown().wait();
+    result.unwrap();
+    close.unwrap();
+    shutdown.unwrap();
+}

@@ -7,7 +7,7 @@
 //! to observe cleanup errors; drop also attempts cleanup.
 //!
 //! The default `embedded-images` feature includes all six pinned UHD B2xx
-//! images. B200, B210, B200mini and B205mini support RX channel zero on RX2.
+//! images. B200, B210, B200mini and B205mini support RX channel zero on RX2 or TX/RX.
 //! The [`b2xx`] module also exposes image loading and diagnostics.
 
 pub mod b2xx;
@@ -18,7 +18,7 @@ pub mod ihex;
 mod high_level;
 pub mod images;
 mod operation;
-pub use b2xx::{RxConfig, RxGain, RxTuneRequest, RxTuneResult};
+pub use b2xx::{RxAntenna, RxConfig, RxGain, RxTuneRequest, RxTuneResult};
 pub use error::{Error, Result};
 pub use high_level::{Device, DeviceBuilder, DeviceDescriptor, RxStream, StreamingStats};
 pub use num_complex::Complex32;

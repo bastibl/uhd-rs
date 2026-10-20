@@ -1,6 +1,6 @@
 //! Receive streaming for B200, B210, B200mini and B205mini.
 //!
-//! The current implementation configures channel zero, the `RX2` antenna,
+//! The current implementation configures channel zero, a selectable RX antenna,
 //! packed `sc16` samples on the USB wire, the FPGA DDC, and cold-starts the
 //! AD9364 before applying the requested stream configuration.
 
@@ -14,6 +14,8 @@ const MAX_RF_HZ: f64 = 6_000_000_000.0;
 const MAX_DECIMATION: u32 = 512;
 const MIN_SAMPLE_RATE_HZ: f64 = MIN_MASTER_CLOCK_HZ / MAX_DECIMATION as f64;
 const MAX_SAMPLE_RATE_HZ: f64 = MAX_MASTER_CLOCK_HZ;
+const MIN_BANDWIDTH_HZ: f64 = 200_000.0;
+const MAX_BANDWIDTH_HZ: f64 = 56_000_000.0;
 const MIN_GAIN_DB: f64 = 0.0;
 const MAX_GAIN_DB: f64 = 76.0;
 // 16-byte timestamped CHDR header + sc16 payload = 16,360 bytes.
@@ -56,6 +58,34 @@ const SRX1_TX: u32 = 1 << 3;
 const LED_RX1: u32 = 1 << 2;
 const STATE_RX1_OFF: u32 = SFDX1_RX | SRX1_TX;
 const STATE_RX1_RX2: u32 = STATE_RX1_OFF | LED_RX1;
+const STATE_RX1_TXRX: u32 = (1 << 4) | SRX1_TX | (1 << 1);
+
+/// Receive connector for logical channel zero. Neither selection enables TX.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RxAntenna {
+    /// Dedicated RX2 connector (the default).
+    #[default]
+    Rx2,
+    /// Shared TX/RX connector, switched to receive.
+    TxRx,
+}
+
+impl RxAntenna {
+    /// Connector name used by UHD and SoapySDR.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rx2 => "RX2",
+            Self::TxRx => "TX/RX",
+        }
+    }
+
+    const fn atr_word(self) -> u32 {
+        match self {
+            Self::Rx2 => STATE_RX1_RX2,
+            Self::TxRx => STATE_RX1_TXRX,
+        }
+    }
+}
 
 /// Input gain selection for a B2xx receive channel.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,7 +139,8 @@ impl RxTuneRequest {
         }
     }
 
-    /// Validate the logical center, physical LO, and CORDIC range.
+    /// Validate the logical center, physical LO, and maximum CORDIC range.
+    /// The device also checks the offset against its selected master clock.
     pub fn validate(self) -> Result<Self> {
         validate_range(
             "center frequency",
@@ -122,13 +153,19 @@ impl RxTuneRequest {
         }
         let rf_frequency_hz = self.center_frequency_hz + self.lo_offset_hz;
         validate_range("RF LO frequency", rf_frequency_hz, MIN_RF_HZ, MAX_RF_HZ)?;
-        if self.lo_offset_hz.abs() >= MASTER_CLOCK_HZ / 2.0 {
+        if self.lo_offset_hz.abs() >= MAX_MASTER_CLOCK_HZ / 2.0 {
             return Err(Error::InvalidArgument(format!(
                 "absolute LO offset must be below {}",
-                MASTER_CLOCK_HZ / 2.0
+                MAX_MASTER_CLOCK_HZ / 2.0
             )));
         }
         Ok(self)
+    }
+
+    pub(crate) fn validate_for_clock(self, clock_hz: f64) -> Result<Self> {
+        let request = self.validate()?;
+        ddc_frequency_word(request.lo_offset_hz, clock_hz)?;
+        Ok(request)
     }
 }
 
@@ -150,6 +187,15 @@ pub struct RxTuneResult {
 }
 
 impl RxConfig {
+    /// Minimum supported receive rate in samples per second.
+    pub const MIN_SAMPLE_RATE_HZ: f64 = MIN_SAMPLE_RATE_HZ;
+    /// Maximum supported receive rate in samples per second.
+    pub const MAX_SAMPLE_RATE_HZ: f64 = MAX_SAMPLE_RATE_HZ;
+    /// Minimum analog receive filter bandwidth in Hz.
+    pub const MIN_BANDWIDTH_HZ: f64 = MIN_BANDWIDTH_HZ;
+    /// Maximum analog receive filter bandwidth in Hz.
+    pub const MAX_BANDWIDTH_HZ: f64 = MAX_BANDWIDTH_HZ;
+
     /// Validate and normalize this configuration without accessing hardware.
     pub fn validate(self) -> Result<Self> {
         validate_range(
@@ -186,6 +232,10 @@ pub(crate) struct B2xxReceiver {
     sample_rate_hz: f64,
     master_clock_hz: Option<f64>,
     gain: RxGain,
+    antenna: Option<RxAntenna>,
+    bandwidth_hz: Option<f64>,
+    requested_bandwidth_hz: Option<f64>,
+    dc_offset_enabled: Option<bool>,
     host_scale: f32,
     streaming: bool,
     device: B2xxDevice,
@@ -281,6 +331,10 @@ impl B2xxReceiver {
             sample_rate_hz: config.sample_rate_hz,
             master_clock_hz: Some(MASTER_CLOCK_HZ),
             gain: config.gain,
+            antenna: Some(RxAntenna::Rx2),
+            bandwidth_hz: Some(MASTER_CLOCK_HZ),
+            requested_bandwidth_hz: None,
+            dc_offset_enabled: Some(true),
             host_scale: 1.0,
             device,
             streaming: true, // Explicitly stop any reception inherited from a prior owner.
@@ -288,7 +342,7 @@ impl B2xxReceiver {
         let mut opening = OpeningReceiver(Some(receiver));
         let receiver = opening.0.as_mut().unwrap();
         receiver.stop().await?;
-        receiver.configure_frontend().await?;
+        receiver.set_antenna(RxAntenna::Rx2).await?;
         receiver.set_sample_rate(config.sample_rate_hz).await?;
         receiver
             .set_center_frequency(config.center_frequency_hz)
@@ -307,9 +361,8 @@ impl B2xxReceiver {
 
     /// Retune the AD9361 receive synthesizer and FPGA DDC as one logical tune.
     pub async fn tune(&mut self, request: RxTuneRequest) -> Result<RxTuneResult> {
-        let request = request.validate()?;
         let master_clock = self.master_clock_hz.ok_or(Error::ReopenRequired)?;
-        ddc_frequency_word(request.lo_offset_hz, master_clock)?;
+        let request = request.validate_for_clock(master_clock)?;
         let target_rf_frequency_hz = request.center_frequency_hz + request.lo_offset_hz;
         self.control.set_stream(StreamId::LocalControl);
         let misc = RadioLayout::new(self.product, self.identity.revision)
@@ -362,12 +415,19 @@ impl B2xxReceiver {
             }
             // A failed or cancelled clock calibration requires reopening the radio.
             self.master_clock_hz = None;
+            self.bandwidth_hz = None;
             master_clock = self
                 .radio
                 .set_clock_rate_on(&mut self.control, master_clock)
                 .await?;
             // Clock calibration restores manual gain; reapply the requested mode.
             self.set_gain(self.gain).await?;
+            if let Some(bandwidth) = self.requested_bandwidth_hz {
+                self.radio
+                    .set_rx_bandwidth_on(&mut self.control, bandwidth.min(master_clock))
+                    .await?;
+            }
+            self.bandwidth_hz = Some(self.radio.rx_bandwidth_hz());
         } else {
             master_clock = current_clock;
         }
@@ -412,6 +472,9 @@ impl B2xxReceiver {
     /// Start or restart continuous immediate reception.
     pub async fn start(&mut self) -> Result<()> {
         self.master_clock_hz.ok_or(Error::ReopenRequired)?;
+        self.antenna()?;
+        self.bandwidth()?;
+        self.dc_offset_enabled()?;
         self.streaming = true; // Cleanup must stop even a cancelled partial start.
         self.control.set_stream(StreamId::RadioControl(0));
         self.control.poke32(SR_RX_FMT, 0).await?; // sc16_item32_le
@@ -453,14 +516,63 @@ impl B2xxReceiver {
         self.device.terminal_close().await
     }
 
-    async fn configure_frontend(&mut self) -> Result<()> {
+    pub(crate) fn antenna(&self) -> Result<RxAntenna> {
+        self.antenna.ok_or(Error::ReopenRequired)
+    }
+
+    pub(crate) fn bandwidth(&self) -> Result<f64> {
+        self.bandwidth_hz.ok_or(Error::ReopenRequired)
+    }
+
+    pub(crate) fn dc_offset_enabled(&self) -> Result<bool> {
+        self.dc_offset_enabled.ok_or(Error::ReopenRequired)
+    }
+
+    pub(crate) async fn set_bandwidth(&mut self, hz: f64) -> Result<f64> {
+        validate_bandwidth(hz)?;
+        let clock = self.master_clock_hz.ok_or(Error::ReopenRequired)?;
+        let requested = if hz == 0.0 { clock } else { hz.min(clock) };
+        self.bandwidth_hz = None;
+        let actual = self
+            .radio
+            .set_rx_bandwidth_on(&mut self.control, requested)
+            .await?;
+        self.requested_bandwidth_hz = (hz != 0.0).then_some(hz);
+        self.bandwidth_hz = Some(actual);
+        Ok(actual)
+    }
+
+    pub(crate) async fn set_dc_offset_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.master_clock_hz.ok_or(Error::ReopenRequired)?;
+        self.dc_offset_enabled = None;
+        self.radio
+            .set_dc_offset_on(&mut self.control, enabled)
+            .await?;
+        self.dc_offset_enabled = Some(enabled);
+        Ok(())
+    }
+
+    pub(crate) async fn set_antenna(&mut self, antenna: RxAntenna) -> Result<()> {
+        self.master_clock_hz.ok_or(Error::ReopenRequired)?;
+        self.antenna = None;
         self.control.set_stream(StreamId::RadioControl(0));
         self.control.poke32(ATR_DISABLE, 0).await?;
         self.control.poke32(ATR_IDLE, STATE_RX1_OFF).await?;
-        self.control.poke32(ATR_RX_ONLY, STATE_RX1_RX2).await?;
+        self.control.poke32(ATR_RX_ONLY, antenna.atr_word()).await?;
         self.control.poke32(ATR_TX_ONLY, STATE_RX1_OFF).await?;
-        self.control.poke32(ATR_FULL_DUPLEX, STATE_RX1_RX2).await?;
+        self.control
+            .poke32(ATR_FULL_DUPLEX, antenna.atr_word())
+            .await?;
+        self.antenna = Some(antenna);
         Ok(())
+    }
+}
+
+pub(crate) fn validate_bandwidth(hz: f64) -> Result<()> {
+    if hz == 0.0 {
+        Ok(())
+    } else {
+        validate_range("bandwidth", hz, MIN_BANDWIDTH_HZ, MAX_BANDWIDTH_HZ)
     }
 }
 
@@ -501,7 +613,7 @@ fn ddc_frequency_word(requested_hz: f64, master_clock_hz: f64) -> Result<(f64, u
     Ok((actual_hz, signed_word as u32))
 }
 
-fn clock_for_rate(requested_rate: f64) -> f64 {
+pub(crate) fn clock_for_rate(requested_rate: f64) -> f64 {
     // UHD's ad936x_manager chooses the largest power-of-two multiple that
     // fits the clock range, skipping a lone halfband (decimation two).
     // Limit the multiplier to the B2xx DDC range so low rates remain attainable.
@@ -632,13 +744,20 @@ mod tests {
         let request = RxTuneRequest::with_lo_offset(100e6, 3.6e6);
         assert_eq!(request.validate().unwrap(), request);
         assert!(
+            RxTuneRequest::with_lo_offset(100e6, 20e6)
+                .validate()
+                .is_ok()
+        );
+        assert!(ddc_frequency_word(20e6, 61.44e6).is_ok());
+        assert!(ddc_frequency_word(20e6, 16e6).is_err());
+        assert!(
             RxTuneRequest::with_lo_offset(70e6, -1.0)
                 .validate()
                 .is_err()
         );
         assert!(RxTuneRequest::with_lo_offset(6e9, 1.0).validate().is_err());
         assert!(
-            RxTuneRequest::with_lo_offset(100e6, 8e6)
+            RxTuneRequest::with_lo_offset(100e6, MAX_MASTER_CLOCK_HZ / 2.0)
                 .validate()
                 .is_err()
         );
@@ -647,6 +766,15 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn receive_antenna_switching_never_enables_transmit() {
+        assert_eq!(RxAntenna::Rx2.atr_word(), 0x4c);
+        assert_eq!(RxAntenna::TxRx.atr_word(), 0x1a);
+        for antenna in [RxAntenna::Rx2, RxAntenna::TxRx] {
+            assert_eq!(antenna.atr_word() & (1 << 7), 0);
+        }
     }
 
     #[test]

@@ -109,6 +109,7 @@ pub(crate) struct Ad9361Controller {
     tx_fir_factor: u8,
     rx_fir_factor: u8,
     rx_bb_lp_bandwidth_hz: f64,
+    rx_bandwidth_hz: f64,
     tx_bb_lp_bandwidth_hz: f64,
     rx_tia_lp_bandwidth_hz: f64,
     tx_secondary_lp_bandwidth_hz: f64,
@@ -140,6 +141,7 @@ impl Default for Ad9361Controller {
             tx_fir_factor: 0,
             rx_fir_factor: 0,
             rx_bb_lp_bandwidth_hz: 0.0,
+            rx_bandwidth_hz: 0.0,
             tx_bb_lp_bandwidth_hz: 0.0,
             rx_tia_lp_bandwidth_hz: 0.0,
             tx_secondary_lp_bandwidth_hz: 0.0,
@@ -249,6 +251,37 @@ impl Ad9361Controller {
         control.set_stream(StreamId::LocalControl);
         let mut io = Ad9361Io::new(B2xxSpi::new(control));
         self.set_rx_agc(&mut io).await
+    }
+
+    pub(crate) fn rx_bandwidth_hz(&self) -> f64 {
+        self.rx_bandwidth_hz
+    }
+
+    pub(crate) async fn set_rx_bandwidth_on(
+        &mut self,
+        control: &mut RadioControl,
+        hz: f64,
+    ) -> Result<f64> {
+        control.set_stream(StreamId::LocalControl);
+        let mut io = Ad9361Io::new(B2xxSpi::new(control));
+        self.set_bandwidth(&mut io, Direction::Rx, hz).await
+    }
+
+    pub(crate) async fn set_dc_offset_on(
+        &mut self,
+        control: &mut RadioControl,
+        enabled: bool,
+    ) -> Result<()> {
+        control.set_stream(StreamId::LocalControl);
+        let mut io = Ad9361Io::new(B2xxSpi::new(control));
+        self.set_dc_offset(&mut io, enabled).await
+    }
+
+    async fn set_dc_offset(&mut self, io: &mut impl RegisterIo, enabled: bool) -> Result<()> {
+        // UHD toggles BB tracking; static RF and BB calibrations remain enabled.
+        io.write(0x18b, if enabled { 0xad } else { 0x8d }).await?;
+        self.dc_offset_tracking = enabled;
+        Ok(())
     }
 
     async fn set_rx_agc(&mut self, io: &mut impl RegisterIo) -> Result<()> {
@@ -884,6 +917,7 @@ impl Ad9361Controller {
                 self.rx_bb_lp_bandwidth_hz =
                     self.calibrate_rx_baseband_filter(io, bandwidth).await?;
                 self.rx_tia_lp_bandwidth_hz = self.calibrate_rx_tia(io, bandwidth).await?;
+                self.rx_bandwidth_hz = bandwidth;
             }
             Direction::Tx => {
                 self.tx_bb_lp_bandwidth_hz =
@@ -1713,6 +1747,38 @@ mod tests {
             assert!(io.writes.starts_with(&[(0x000, 0x01), (0x000, 0x00)]));
             assert!(io.writes.contains(&(0x006, 0x0f)));
             assert!(io.writes.contains(&(0x007, 0x0f)));
+        });
+    }
+
+    #[test]
+    fn bandwidth_and_dc_controls_preserve_calibration_and_tracking_state() {
+        futures_lite::future::block_on(async {
+            let mut io = SimulatedAd9364::ready();
+            let mut controller = Ad9361Controller::default();
+            controller.initialize(&mut io).await.unwrap();
+            controller.set_clock_rate(&mut io, 32e6).await.unwrap();
+            controller
+                .set_active_chains(&mut io, false, false, true, false)
+                .await
+                .unwrap();
+            controller
+                .set_bandwidth(&mut io, Direction::Rx, 2e6)
+                .await
+                .unwrap();
+            assert_eq!(controller.rx_bandwidth_hz(), 2e6);
+            assert_eq!(controller.rx_bb_lp_bandwidth_hz, 1e6);
+            let dc_cal = io.registers[&0x193];
+            controller.set_dc_offset(&mut io, false).await.unwrap();
+            assert_eq!(io.registers[&0x18b], 0x8d);
+            assert_eq!(io.registers[&0x193], dc_cal);
+            controller.set_clock_rate(&mut io, 56e6).await.unwrap();
+            assert_eq!(io.registers[&0x18b], 0x8d);
+            controller.tune(&mut io, Direction::Rx, 3e9).await.unwrap();
+            assert_eq!(io.registers[&0x18b], 0x8d);
+            assert_eq!(io.registers[&0x169], 0xcf);
+            controller.set_dc_offset(&mut io, true).await.unwrap();
+            assert_eq!(io.registers[&0x18b], 0xad);
+            assert_eq!(io.registers[&0x017], 0x0a);
         });
     }
 
