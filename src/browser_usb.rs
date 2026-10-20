@@ -115,6 +115,56 @@ export function install_fx3_usb(bootloader) {
 export function interface_calls(d) { return d.claims + d.releases; }
 export function firmware_writes(d) { return d.writes; }
 export function change_boot_serial(d) { d.serialNumber = 'bootloader-only'; }
+export function install_fpga_usb(speed, length, failure) {
+ const d = install_usb();
+ d.state = 0; d.hash = 0; d.data = []; d.events = []; d.inflight = 0;
+ const word = n => Array.from(new Uint8Array(new Uint32Array([n]).buffer));
+ Object.defineProperties(d, {
+  configurations: {value: []},
+  open: {value: () => Promise.resolve()},
+  controlTransferIn: {value: (setup, size) => {
+   let bytes;
+   switch (setup.request) {
+    case 0x06: bytes = [18,1,0,3,0,0,0,9,0,0x25,0x20,0,0,0,0,0,0,0].slice(0,size); break;
+    case 0x80: bytes = [speed]; break;
+    case 0x1d: bytes = word(d.hash); break;
+    case 0x83: bytes = [d.state]; break;
+    case 0x22: bytes = new Array(size).fill(0); break;
+    default: throw new Error('unexpected FPGA control read ' + setup.request);
+   }
+   return Promise.resolve({status:'ok', data:new DataView(new Uint8Array(bytes).buffer)});
+  }},
+  controlTransferOut: {value: (setup, data) => {
+   if (d.inflight) throw new Error('FPGA writes must be sequential');
+   d.events.push(setup.request);
+   switch (setup.request) {
+    case 0x1c: d.hash = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, true); break;
+    case 0x55: d.state = 1; break;
+    case 0x02: d.state = 2; break;
+    case 0x12:
+     if (d.state !== 2 || d.hash !== 0) throw new Error('FPGA write before start/hash invalidation');
+     if (data.byteLength > (speed === 3 ? 512 : 64)) throw new Error('FPGA buffer overflow');
+     if (failure && d.data.length > 0) {
+      if (failure === 1) return Promise.resolve({status:'stall', bytesWritten:0});
+      return Promise.reject(new Error('device disconnected'));
+     }
+     d.data.push(...new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+     if (d.data.length === length) d.state = 4;
+     break;
+    default: throw new Error('unexpected FPGA control write');
+   }
+   d.inflight++;
+   return new Promise(resolve => setTimeout(() => {
+    d.inflight--;
+    resolve({status:'ok', bytesWritten:data.byteLength});
+   }, 1));
+  }}
+ });
+ return d;
+}
+export function fpga_bytes(d) { return new Uint8Array(d.data); }
+export function fpga_hash(d) { return d.hash; }
+export function fpga_events(d) { return new Uint8Array(d.events); }
 ")]
     extern "C" {
         fn install_usb() -> web_sys::UsbDevice;
@@ -125,6 +175,52 @@ export function change_boot_serial(d) { d.serialNumber = 'bootloader-only'; }
         fn interface_calls(d: &web_sys::UsbDevice) -> u32;
         fn firmware_writes(d: &web_sys::UsbDevice) -> u32;
         fn change_boot_serial(d: &web_sys::UsbDevice);
+        fn install_fpga_usb(speed: u32, length: usize, failure: u32) -> web_sys::UsbDevice;
+        fn fpga_bytes(d: &web_sys::UsbDevice) -> js_sys::Uint8Array;
+        fn fpga_hash(d: &web_sys::UsbDevice) -> u32;
+        fn fpga_events(d: &web_sys::UsbDevice) -> js_sys::Uint8Array;
+    }
+
+    #[wasm_bindgen_test]
+    async fn fpga_loader_matches_uhd_sequence_at_both_usb_speeds() {
+        for (speed, chunk) in [(2, 64), (3, 512)] {
+            let image = (0..(chunk * 3 + 7)).map(|i| i as u8).collect::<Vec<_>>();
+            let raw = install_fpga_usb(speed, image.len(), 0);
+            let info = crate::Device::list().await.unwrap().pop().unwrap();
+            let device = info.open().await.unwrap();
+            assert_eq!(
+                device.load_fpga(&image, false).await.unwrap(),
+                crate::b2xx::LoadOutcome::Loaded
+            );
+            assert_eq!(fpga_bytes(&raw).to_vec(), image);
+            assert_eq!(fpga_hash(&raw), crate::b2xx::image_hash(&image));
+            let expected = vec![0x1c, 0x55, 0x02, 0x12, 0x12, 0x12, 0x12, 0x1c];
+            assert_eq!(fpga_events(&raw).to_vec(), expected);
+            assert_eq!(
+                device.load_fpga(&image, false).await.unwrap(),
+                crate::b2xx::LoadOutcome::AlreadyLoaded
+            );
+            assert_eq!(
+                fpga_events(&raw).to_vec(),
+                expected,
+                "Warm opens must skip the upload"
+            );
+            drop(device);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn failed_fpga_write_stops_without_publishing_image_hash() {
+        for failure in 1..=2 {
+            let raw = install_fpga_usb(3, 1600, failure);
+            let info = crate::Device::list().await.unwrap().pop().unwrap();
+            let device = info.open().await.unwrap();
+            let result = device.load_fpga(&vec![42; 1600], false).await;
+            assert!(result.is_err());
+            assert_eq!(fpga_hash(&raw), 0);
+            assert_eq!(fpga_events(&raw).to_vec(), [0x1c, 0x55, 0x02, 0x12, 0x12]);
+            drop(device);
+        }
     }
     #[wasm_bindgen_test]
     async fn terminal_browser_close_aborts_pending_operations_and_is_idempotent() {

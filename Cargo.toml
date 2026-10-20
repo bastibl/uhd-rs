@@ -33,6 +33,7 @@ async-lock = "3.4"
 web-time = "1.1"
 rust-embed = { version = "8.12", optional = true, features = ["debug-embed", "compression", "deterministic-timestamps"] }
 thiserror = "2.0"
+log = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

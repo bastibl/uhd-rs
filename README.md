@@ -54,6 +54,27 @@ The pinned UHD 4.8 image set uses FPGA revision `c37b318` and firmware revision 
 
 Opening loads firmware if needed, reconnects, reads motherboard identity, selects the corresponding FPGA and validates compatibility before radio initialization. Compatible running firmware is reused. Use `.reload_firmware(true)` to explicitly reload firmware; malformed firmware is rejected before resetting a working device. FPGA loading is skipped only when the selected image hash matches and FX3 reports it running. Opening never installs the bootloader.
 
+The FX3 loader merges adjacent HEX records into writes of up to 4096 bytes,
+the boot ROM limit documented in Infineon AN76405, only when the entire merged
+span lies within one ITCM, DTCM or system RAM region from the FX3 memory map
+(Technical Reference Manual 001-76074, Table 10-1). MMIO and unknown-address
+records retain their individual writes. Address gaps, overlaps, record order and
+the final execute request are preserved. The running firmware has a
+separate FPGA buffer limit: 64 bytes on USB 2 and 512 bytes on USB 3.
+
+FPGA loading follows [Ettus UHD's B200 loader](https://github.com/EttusResearch/uhd/blob/master/host/lib/usrp/b200/b200_iface.cpp):
+invalidate the image hash, configure/start the FPGA, send each buffer sequentially,
+wait for the running state, then publish the new hash. Control transfers use
+`nusb` on both native and browser targets.
+There is no loader build switch. The `log` facade reports upload counts, USB speed,
+chunk size, firmware/FPGA times, reconnection time and radio initialization time.
+Measure FX3 upload times from cold starts; warm
+opens can reuse both images. In a native B210 USB 3 cold-start comparison, firmware
+loading including USB reattachment took 1.484 s with individual HEX records and
+0.563 s with RAM-only merging. These are single runs per variant, not browser
+timings or guarantees for other hosts. Unlike [UHD's record-by-record HEX reader](https://github.com/EttusResearch/uhd/blob/master/host/lib/utils/ihex.cpp),
+adjacent firmware records are merged to reduce browser/USB round trips.
+
 Override individual assets with `.image(Image::Firmware, bytes)` or supply an `ImageCatalog` with `.images(catalog)`. Overrides take precedence over embedded bytes. With `default-features = false`, supply any image that must be loaded. A running FPGA with the pinned catalog hash may be reused without its bytes.
 
 Native reconnection matches the original physical connector and known running-device serial. Linux USB 2/3 companion ports are resolved through the kernel's `peer` links. There is no fallback to an unrelated device. Set `.reconnect_timeout(Duration::from_secs(...))` to change the default 10-second deadline.

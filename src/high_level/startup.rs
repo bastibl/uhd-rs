@@ -59,6 +59,7 @@ pub(super) async fn prepare<B: Backend>(
     timeout: Duration,
 ) -> Result<B::Handle> {
     if backend.loaded(&info) && !reload {
+        log::info!("Reusing running FX3 firmware");
         let device = backend.open(info).await?;
         backend.check_firmware(&device).await?;
         return Ok(device);
@@ -76,7 +77,13 @@ pub(super) async fn prepare<B: Backend>(
     };
     bounded(backend.firmware(&device, &image), Duration::from_secs(30)).await?;
     drop(device);
+    let reconnecting = web_time::Instant::now();
+    log::info!("Waiting for FX3 USB reattachment");
     let device = reconnect(backend, &key, true, timeout).await?;
+    log::info!(
+        "FX3 reattached after {:.3}s",
+        reconnecting.elapsed().as_secs_f64()
+    );
     backend.check_firmware(&device).await?;
     Ok(device)
 }
@@ -96,7 +103,14 @@ pub(super) async fn open<B: Backend>(
             if backend.running_hash(&device).await? == Some(image_id.pinned_hash()) => {}
         Err(error) => return Err(error),
     }
-    backend.initialize(device, config).await
+    let initializing = web_time::Instant::now();
+    log::info!("Initializing radio and calibrating AD9361");
+    let radio = backend.initialize(device, config).await?;
+    log::info!(
+        "Radio initialization finished in {:.3}s",
+        initializing.elapsed().as_secs_f64()
+    );
+    Ok(radio)
 }
 async fn reconnect<B: Backend>(
     backend: &B,

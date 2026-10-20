@@ -26,6 +26,16 @@ const EEPROM_READ: u8 = 0xbb;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+// FX3 boot ROM supports up to 4 KiB per A0 RAM write (Infineon AN76405).
+// This is independent of the running firmware's 64/512-byte FPGA buffer.
+const FIRMWARE_WRITE_SIZE: usize = 4096;
+// FX3 Technical Reference Manual (001-76074), Table 10-1. Ends are exclusive.
+// Only merge spans within one RAM region; MMIO writes have separate rules.
+const FIRMWARE_RAM_REGIONS: [(u32, u32); 3] = [
+    (0x0000_0000, 0x0000_4000), // ITCM: 16 KiB
+    (0x1000_0000, 0x1000_2000), // DTCM: 8 KiB
+    (0x4000_0000, 0x4008_0000), // System RAM: 512 KiB
+];
 
 /// Firmware ABI required by this implementation.
 pub const REQUIRED_FIRMWARE: FirmwareCompatibility = FirmwareCompatibility { major: 8, minor: 0 };
@@ -236,7 +246,9 @@ impl B2xxDevice {
                 "FX3 firmware can only be loaded while the device is in its bootloader".into(),
             ));
         }
-        let segments = ihex::parse(image)?;
+        let segments = firmware_writes(ihex::parse(image)?);
+        let started = web_time::Instant::now();
+        log::info!("Uploading FX3 firmware in {} RAM writes", segments.len());
         for segment in segments {
             let address = segment.address.to_le_bytes();
             self.control_write(
@@ -248,6 +260,10 @@ impl B2xxDevice {
             )
             .await?;
         }
+        log::info!(
+            "FX3 firmware upload finished in {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
         Ok(())
     }
 
@@ -272,10 +288,19 @@ impl B2xxDevice {
         let hash = image_hash(image);
         if !force && self.fpga_hash().await? == hash && self.fx3_state().await? == Fx3State::Running
         {
+            log::info!("FPGA image already loaded; skipping upload");
             return Ok(LoadOutcome::AlreadyLoaded);
         }
 
-        let transfer_size = self.usb_speed().await?.control_transfer_size();
+        let speed = self.usb_speed().await?;
+        let transfer_size = speed.control_transfer_size();
+        log::info!(
+            "FPGA upload: USB {}, {} bytes, sequential {}-byte writes",
+            speed.major_version(),
+            image.len(),
+            transfer_size
+        );
+        let started = web_time::Instant::now();
         self.control_read(LOOP, 0, 0, transfer_size, CONTROL_TIMEOUT)
             .await?;
         self.set_fpga_hash(0).await?;
@@ -287,13 +312,33 @@ impl B2xxDevice {
             .await?;
         self.wait_for_state(Fx3State::ConfiguringFpga, Duration::from_secs(10))
             .await?;
+        let uploading = web_time::Instant::now();
+        // Follow Ettus UHD's b200_iface: one completed control write per
+        // firmware buffer, then wait for Running before publishing the hash.
+        let mut next_progress = 10;
+        let mut transferred = 0;
         for chunk in image.chunks(transfer_size) {
             self.control_write(FPGA_DATA, 0, 0, chunk, IMAGE_TIMEOUT)
                 .await?;
+            transferred += chunk.len();
+            let percent = transferred * 100 / image.len();
+            if percent >= next_progress {
+                log::info!(
+                    "FPGA upload: {percent}% ({transferred}/{} bytes, {:.1}s)",
+                    image.len(),
+                    uploading.elapsed().as_secs_f64()
+                );
+                next_progress = (percent / 10 + 1) * 10;
+            }
         }
+        log::info!(
+            "FPGA data transferred in {:.3}s; waiting for running state",
+            uploading.elapsed().as_secs_f64()
+        );
         self.wait_for_state(Fx3State::Running, IMAGE_TIMEOUT)
             .await?;
         self.set_fpga_hash(hash).await?;
+        log::info!("FPGA ready after {:.3}s", started.elapsed().as_secs_f64());
         Ok(LoadOutcome::Loaded)
     }
 
@@ -530,6 +575,36 @@ impl B2xxDevice {
     }
 }
 
+// Preserve address discontinuities, record order, and the final execute write.
+// The published HEX image mostly contains 16-byte records; sending each record
+// separately adds thousands of browser/USB round trips.
+fn firmware_writes(segments: Vec<ihex::Segment>) -> Vec<ihex::Segment> {
+    let mut writes: Vec<ihex::Segment> = Vec::new();
+    for segment in segments {
+        if !segment.execute
+            && !segment.data.is_empty()
+            && let Some(last) = writes.last_mut()
+            && !last.execute
+            && !last.data.is_empty()
+            && last.address.checked_add(last.data.len() as u32) == Some(segment.address)
+            && last.data.len() + segment.data.len() <= FIRMWARE_WRITE_SIZE
+            && last
+                .address
+                .checked_add((last.data.len() + segment.data.len()) as u32)
+                .is_some_and(|end| {
+                    FIRMWARE_RAM_REGIONS
+                        .iter()
+                        .any(|&(start, limit)| start <= last.address && end <= limit)
+                })
+        {
+            last.data.extend(segment.data);
+        } else {
+            writes.push(segment);
+        }
+    }
+    writes
+}
+
 #[derive(Clone, Copy)]
 struct IdentityLayout {
     revision: usize,
@@ -591,6 +666,131 @@ pub fn image_hash(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firmware_writes_preserve_memory_order_boundaries_and_execution() {
+        let data = |address, bytes: &[u8]| ihex::Segment {
+            address,
+            data: bytes.to_vec(),
+            execute: false,
+        };
+        let execute = ihex::Segment {
+            address: 0x100,
+            data: vec![],
+            execute: true,
+        };
+        let input = vec![
+            data(0x100, &[1, 2]),
+            data(0x102, &[3, 4]),
+            data(0x200, &[5]),
+            data(0x200, &[6]),
+            data(0xffff_ffff, &[7]),
+            data(0, &[8]),
+            execute.clone(),
+        ];
+        assert_eq!(
+            firmware_writes(input),
+            vec![
+                data(0x100, &[1, 2, 3, 4]),
+                data(0x200, &[5]),
+                data(0x200, &[6]),
+                data(0xffff_ffff, &[7]),
+                data(0, &[8]),
+                execute,
+            ]
+        );
+        let records = (0..300)
+            .map(|n| data(n * 16, &[n as u8; 16]))
+            .collect::<Vec<_>>();
+        let bytes = records
+            .iter()
+            .flat_map(|r| r.data.iter().copied())
+            .collect::<Vec<_>>();
+        let writes = firmware_writes(records);
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].data.len(), FIRMWARE_WRITE_SIZE);
+        assert_eq!(writes[1].address, FIRMWARE_WRITE_SIZE as u32);
+        assert_eq!(
+            writes.into_iter().flat_map(|w| w.data).collect::<Vec<_>>(),
+            bytes
+        );
+    }
+
+    #[cfg(feature = "embedded-images")]
+    #[test]
+    fn embedded_firmware_coalescing_preserves_every_address_and_byte() {
+        let image = crate::images::Image::Firmware.embedded().unwrap();
+        let records = ihex::parse(&image).unwrap();
+        let flatten = |records: &[ihex::Segment]| {
+            records
+                .iter()
+                .flat_map(|r| {
+                    r.data
+                        .iter()
+                        .enumerate()
+                        .map(move |(i, byte)| (r.address + i as u32, *byte))
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = flatten(&records);
+        let execute = records.last().unwrap().clone();
+        let count = records.len();
+        let writes = firmware_writes(records);
+        assert_eq!(flatten(&writes), before);
+        assert_eq!(writes.last(), Some(&execute));
+        assert!(writes.iter().all(|w| w.data.len() <= FIRMWARE_WRITE_SIZE));
+        assert!(writes.len() < count / 10);
+        println!("FX3 firmware writes: {count} -> {}", writes.len());
+    }
+
+    #[test]
+    fn firmware_writes_merge_only_complete_ram_spans() {
+        let record = |address, len| ihex::Segment {
+            address,
+            data: vec![0x5a; len],
+            execute: false,
+        };
+        for (start, end) in FIRMWARE_RAM_REGIONS {
+            for address in [start, end - 8] {
+                assert_eq!(
+                    firmware_writes(vec![record(address, 4), record(address + 4, 4)]),
+                    [record(address, 8)],
+                    "merge records fully inside RAM at {address:#x}"
+                );
+            }
+            let mut cases = vec![
+                vec![record(end - 4, 4), record(end, 4)],
+                vec![record(end - 2, 4), record(end + 2, 2)],
+                vec![record(end - 6, 4), record(end - 2, 4)],
+            ];
+            if start >= 4 {
+                cases.push(vec![record(start - 4, 4), record(start, 4)]);
+                cases.push(vec![record(start - 2, 4), record(start + 2, 4)]);
+            }
+            for records in cases {
+                assert_eq!(
+                    firmware_writes(records.clone()),
+                    records,
+                    "preserve records spanning RAM boundary {start:#x}..{end:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn firmware_writes_preserve_mmio_and_unknown_records_individually() {
+        for address in [0xe000_0000, 0xffff_f000, 0xffff_0000, 0x2000_0000] {
+            let records: Vec<_> = [address, address + 4]
+                .into_iter()
+                .map(|address| ihex::Segment {
+                    address,
+                    data: vec![0x5a; 4],
+                    execute: false,
+                })
+                .collect();
+            assert_eq!(firmware_writes(records.clone()), records);
+        }
+    }
 
     #[test]
     fn parses_revision_one_identity() {

@@ -880,6 +880,7 @@ dependencies = [
  "futures-lite",
  "futures-timer",
  "js-sys",
+ "log",
  "num-complex",
  "nusb",
  "rust-embed",
