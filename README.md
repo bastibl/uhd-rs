@@ -104,7 +104,7 @@ WebUSB requires a secure browser-window context. Set `--cfg=web_sys_unstable_api
 cargo check --target wasm32-unknown-unknown --all-targets
 ```
 
-Permission requests are separate from opening. Browser firmware loading uses device-level control transfers without claiming interface zero, so dropping the disconnected bootloader handle does not try to release an interface. Reconnection retains the selected device's serial, including in bootloader mode. If a re-enumerated device cannot be identified among authorized devices, opening returns `Error::PermissionRequired`; request a new user gesture and select it again. Devices without a known serial, or whose serial changes after firmware loading, cannot safely be matched across browser reconnection.
+Permission requests are separate from opening. Browser firmware loading uses device-level control transfers without claiming interface zero, so dropping the disconnected bootloader handle does not try to release an interface. Reconnection retains the selected device's serial, including in bootloader mode. After firmware loading, the browser waits up to one second (or a shorter configured reconnect timeout) for an authorized identity to reappear. If it cannot identify the re-enumerated device, opening returns `Error::PermissionRequired`; treat this as a setup continuation, request a new user gesture and select it again. Devices without a known serial, or whose serial changes after firmware loading, cannot safely be matched across browser reconnection.
 
 AD9361 FIR and gain-table loading uses a continuously replenished window of up to
 64 consecutive register writes in the browser. Each command has its receive posted

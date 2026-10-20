@@ -294,16 +294,18 @@ export function fpga_events(d) { return new Uint8Array(d.events); }
             crate::images::Image::Firmware,
             b":020000040001F9\n:0400100001020304E2\n:0400000500010010E6\n:00000001FF\n".to_vec(),
         );
+        let started = web_time::Instant::now();
         assert!(matches!(
             crate::b2xx::load_firmware_and_reconnect(
                 info,
                 &images,
                 false,
-                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(10),
             )
             .await,
             Err(Error::PermissionRequired)
         ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert_eq!(firmware_writes(&bootloader), 2);
         assert_eq!(interface_calls(&bootloader), 0);
     }

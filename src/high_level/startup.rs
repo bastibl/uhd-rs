@@ -118,6 +118,15 @@ async fn reconnect<B: Backend>(
     firmware: bool,
     timeout: Duration,
 ) -> Result<B::Handle> {
+    // WebUSB cannot discover a newly enumerated identity without permission.
+    // Give an already-authorized identity a short chance to reappear, then
+    // return the typed continuation request instead of a ten-second stall.
+    #[cfg(target_arch = "wasm32")]
+    let timeout = if firmware {
+        timeout.min(Duration::from_secs(1))
+    } else {
+        timeout
+    };
     bounded(
         async {
             loop {
