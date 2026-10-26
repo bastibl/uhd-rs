@@ -145,7 +145,7 @@ cargo run -- peek 0x50
 
 The capture example writes ten seconds of headerless interleaved little-endian `f32` IQ. Both examples close the stream and shut down the device explicitly, including after a receive error. Pass a serial after diagnostic command arguments when multiple devices are connected. `b2xx::load_firmware_and_reconnect` and `B2xxDevice::open_fpga_session` expose image/reconnection and checked local-control diagnostics without initializing the radio. Radio-register loopback needs the radio clock initialized.
 
-B2xx normally uses unaligned 8176/16360-byte IN requests. nusb 0.2.7 requires requests aligned to endpoint packet size; the driver retains the existing 16384-byte workaround and accepts short completions. The aligned-transfer workaround is verified on B210; other models still need hardware RX validation.
+B2xx normally uses unaligned 8176/16360-byte IN requests. nusb 0.2 requires requests aligned to endpoint packet size; the driver retains the existing 16384-byte workaround and accepts short completions. The aligned-transfer workaround is verified on B210; other models still need hardware RX validation.
 
 ## Migration and verification
 

@@ -1,6 +1,6 @@
 [package]
 name = "uhd-rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.88"
 description = "Rust-native USRP B2xx RX driver built on nusb."
@@ -27,7 +27,7 @@ wasm = []
 [dependencies]
 futures-lite = "2.6"
 futures-timer = { version = "3.0", features = ["wasm-bindgen"] }
-nusb = "0.2.7"
+nusb = "0.2.9"
 num-complex = "0.4"
 async-lock = "3.4"
 web-time = "1.1"
